@@ -169,6 +169,12 @@ lookupUnit name = Map.lookup name . bpUnits
 
 -- | Apply overrides to a build plan.
 --   Each override replaces (or inserts) the pinned version for its package.
+--
+--   A unit whose version an override changes keeps no source directory
+--   from the plan: that directory holds the planned version's tree, not
+--   the overridden one's, and neither 'puSrcDir' nor the directory an
+--   'OriginDistribution' carries may keep saying otherwise.  An override
+--   at the unit's own version changes nothing.
 applyOverrides :: [PackageOverride] -> BuildPlan -> BuildPlan
 applyOverrides overrides bp = bp
   { bpUnits     = foldr applyOverride (bpUnits bp) overrides
@@ -176,13 +182,27 @@ applyOverrides overrides bp = bp
   }
   where
     applyOverride (PackageOverride n v) =
-      Map.insertWith (\_ old -> old { puId = (puId old) { pkgVersion = v } }) n
+      Map.insertWith (\_ old -> overrideVersion v old) n
         PlannedUnit { puId = PackageId n v
                     , puUnitId = unpinnedUnitId n v
                     , puDeps = [], puIsLocal = False
                     , puOrigin = OriginDistribution Nothing
                     , puSrcDir = Nothing, puDistDir = Nothing
                     , puLibComponents = [] }
+
+-- | Move a unit to another version.  The source directory the plan
+-- named belongs to the version it pinned, so it goes with it; an
+-- override at the unit's own version is the identity.
+overrideVersion :: Version -> PlannedUnit -> PlannedUnit
+overrideVersion v pu
+  | pkgVersion (puId pu) == v = pu
+  | otherwise = pu
+      { puId     = (puId pu) { pkgVersion = v }
+      , puSrcDir = Nothing
+      , puOrigin = case puOrigin pu of
+          OriginDistribution _ -> OriginDistribution Nothing
+          origin               -> origin
+      }
 
 -- | The pseudo-configuration a package no plan resolved is indexed under.
 --

@@ -6,6 +6,17 @@ loosely follows [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A source asked for at a version other than the plan's is no longer
+  answered from the plan's source directory.** `hypha source
+  pkg-<other>` and `--package-override pkg=<other>` for a package the
+  plan builds from a directory (a local package or a
+  `source-repository-package` checkout) used to answer with the planned
+  version's tree, silently. They now look for the requested version
+  where they would for any package without a directory: the cabal store,
+  hypha's extracted-source cache, Hackage.
+
 ### Removed
 
 - **`hypha package` no longer reports `deps_count`** (issue #74). The

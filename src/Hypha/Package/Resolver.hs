@@ -246,7 +246,7 @@ localPackageSource
   -> PackageId
   -> IO (Maybe FilePath)
 localPackageSource env sourceCache plan pid = runMaybeT $ msum
-  [ MaybeT (existingDir (planSrcDir plan (pkgName pid)))
+  [ MaybeT (existingDir (planSrcDir plan pid))
   , MaybeT (locatePackageSource env pid)
   , MaybeT (existingDir (Just (extractedSourceDir sourceCache pid)))
   ]
@@ -267,14 +267,17 @@ extractedSourceDir sourceCache pid =
   sourceCache </> Text.unpack (renderPackageId pid)
 
 -- | Look up the package source directory from the build plan's 'puSrcDir'.
--- Returns 'Just dir' only for local (inplace) packages that have a
--- 'LocalUnpackedPackage' entry in the plan.  Returns 'Nothing' for
--- store/Hackage packages.
-planSrcDir :: BuildPlan -> PackageName -> Maybe FilePath
-planSrcDir plan name =
-  case lookupUnit name plan of
-    Just pu | Just dir <- puSrcDir pu -> Just dir
-    _                                 -> Nothing
+-- Returns 'Just dir' only for a unit the plan gives a directory (a local
+-- package, a @source-repository-package@ checkout, a @pre-existing@ unit
+-- with a @pkg-src@) /and/ only at the version the plan pins: the
+-- directory holds that version's tree, and answering for another
+-- version with it would be the wrong tree, silently.  'Nothing' for
+-- any other package or version.
+planSrcDir :: BuildPlan -> PackageId -> Maybe FilePath
+planSrcDir plan pid =
+  case lookupUnit (pkgName pid) plan of
+    Just pu | puId pu == pid, Just dir <- puSrcDir pu -> Just dir
+    _                                                -> Nothing
 
 -- | Extract the version field from a Hackage package JSON response.
 extractVersion :: Value -> Maybe Version

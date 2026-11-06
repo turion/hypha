@@ -12,11 +12,14 @@ import System.IO.Temp (withSystemTempDirectory)
 import qualified Data.Map.Strict as Map
 
 import Data.Aeson qualified as Aeson
+import Hypha.BuildEnv.Mock (emptyMock, mkMockBuildEnv)
 import Hypha.Command.Package (packageOriginToJSON)
+import Hypha.Hackage.Api (mkOfflineHackageClient)
+import Hypha.Package.Resolver (PackageResolver (..), mkPackageResolver, planSrcDir)
 import Hypha.Project.Discovery (DiscoveryError (..), cabalStoreBase)
 
 import Hypha.Types.BuildPlan
-import Hypha.Types.PackageId (PackageName (..), Version (..))
+import Hypha.Types.PackageId (PackageId (..), PackageName (..), Version (..))
 import Hypha.Project.Discovery (discoverProjectRoot)
 import Hypha.Project.Plan (PlanPin (..), loadBuildPlan, loadPlanVersions)
 import Hypha.Project.Overrides (parsePackageOverride)
@@ -32,6 +35,8 @@ tests = testGroup "Unit.Project"
   , testLoadPlanVersionsAgrees
   , testParseOverride
   , testApplyOverrides
+  , testOverrideDropsSourceDirectory
+  , testSourceLookupMatchesPlanVersion
   ]
 
 testDiscovery :: TestTree
@@ -278,3 +283,62 @@ testApplyOverrides = testCase "applyOverrides changes pinned version in plan" $
         lookupPackage (PackageName "base") bp' @?= Just (Version "4.18.3.0")
         -- Check that overrides are recorded
         bpOverrides bp' @?= [override]
+
+-- | A source directory the plan named holds the planned version's tree,
+-- so an override that moves the unit to another version must not keep
+-- it, on the unit or inside a distribution origin.  An override at the
+-- unit's own version changes nothing.
+testOverrideDropsSourceDirectory :: TestTree
+testOverrideDropsSourceDirectory =
+  testCase "applyOverrides drops the source directory of a unit whose version it changes" $
+    withSystemTempDirectory "hypha-plan" $ \cacheDir -> do
+      let fixtureDir = "test" </> "fixtures" </> "pre-existing-src"
+          srcDir     = fixtureDir </> "patched-dep"
+          patched    = PackageName "patched-dep"
+          app        = PackageName "app"
+      result <- loadBuildPlan cacheDir (ProjectRoot fixtureDir)
+      case result of
+        Left err -> error ("Expected to parse plan, got: " ++ show err)
+        Right bp -> do
+          let moved = applyOverrides [PackageOverride patched (Version "2.0")] bp
+          fmap puSrcDir (lookupUnit patched moved) @?= Just Nothing
+          fmap puOrigin (lookupUnit patched moved)
+            @?= Just (OriginDistribution Nothing)
+          lookupPackage patched moved @?= Just (Version "2.0")
+          -- A local unit loses its directory too.
+          let movedApp = applyOverrides [PackageOverride app (Version "9.9")] bp
+          fmap puSrcDir (lookupUnit app movedApp) @?= Just Nothing
+          -- At the unit's own version nothing changes.
+          let same = applyOverrides [PackageOverride patched (Version "1.0")] bp
+          fmap puSrcDir (lookupUnit patched same) @?= Just (Just srcDir)
+          fmap puOrigin (lookupUnit patched same)
+            @?= Just (OriginDistribution (Just srcDir))
+
+-- | The first rung of source resolution answers from a plan unit's source
+-- directory only at the version the plan pins; at another version it
+-- falls through (here to nothing: the build environment and the
+-- extracted-source cache are empty), rather than answering with the
+-- planned version's tree.
+testSourceLookupMatchesPlanVersion :: TestTree
+testSourceLookupMatchesPlanVersion =
+  testCase "source lookup answers from a plan's source directory only at the plan's version" $
+    withSystemTempDirectory "hypha-plan" $ \cacheDir -> do
+      let fixtureDir = "test" </> "fixtures" </> "pre-existing-src"
+          srcDir     = fixtureDir </> "patched-dep"
+          patched    = PackageName "patched-dep"
+          planned    = PackageId patched (Version "1.0")
+          other      = PackageId patched (Version "2.0")
+      result <- loadBuildPlan cacheDir (ProjectRoot fixtureDir)
+      case result of
+        Left err -> error ("Expected to parse plan, got: " ++ show err)
+        Right bp -> do
+          planSrcDir bp planned @?= Just srcDir
+          planSrcDir bp other   @?= Nothing
+          client   <- mkOfflineHackageClient cacheDir
+          resolver <- mkPackageResolver (mkMockBuildEnv emptyMock) client cacheDir bp
+          resolveSrcLocal resolver planned >>= (@?= Just srcDir)
+          resolveSrcLocal resolver other   >>= (@?= Nothing)
+          -- The same request after --package-override at that version.
+          let overridden = applyOverrides [PackageOverride patched (Version "2.0")] bp
+          resolver' <- mkPackageResolver (mkMockBuildEnv emptyMock) client cacheDir overridden
+          resolveSrcLocal resolver' other >>= (@?= Nothing)
