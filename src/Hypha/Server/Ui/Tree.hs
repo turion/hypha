@@ -38,7 +38,9 @@ sidebar pkgs = do
 
 -- | Partition sidebar entries into (project packages, dependencies).
 -- Only 'OriginLocal' counts as project: source-repository-package and
--- tarball entries are pinned third-party code, not the project itself.
+-- tarball entries are pinned third-party code, not the project itself,
+-- and so is a distribution unit whose plan entry names a source
+-- directory.
 splitByOrigin
   :: [(Text, PackageOrigin)]
   -> ([(Text, PackageOrigin)], [(Text, PackageOrigin)])
@@ -108,11 +110,17 @@ originBadgeFull o =
 
 -- | Right-aligned \"view on Hackage\" link for the package page header.
 --
--- Hackage-sourced /and/ distribution packages both get one: @containers@,
--- @base@ and every other library shipped with GHC is published on Hackage
--- at the version the plan pins, so withholding the link there was simply
--- wrong.  A boot library from an unreleased GHC can 404, which is rare and
--- honest.
+-- Hackage-sourced /and/ distribution packages both get one, whether or not
+-- the plan entry names a source directory: @containers@, @base@ and every
+-- other library shipped with GHC is published on Hackage at the version the
+-- plan pins, so withholding the link there was simply wrong.  A boot library
+-- from an unreleased GHC can 404, which is rare and honest.
+--
+-- A distribution package's source directory (a plan overlay gives most of a
+-- nix project's dependencies one) says where its source is, not whether
+-- Hackage lists that version.  A patched package, or one Hackage never had,
+-- was linked just the same before it had a directory, and a link that can
+-- 404 is no worse than that.
 --
 -- Local, source-repo and tarball packages still get nothing: for those the
 -- version does not identify a Hackage listing, and a link would send the
@@ -123,7 +131,7 @@ originBadgeFull o =
 hackageLink :: PackageName -> Version -> PackageOrigin -> Html ()
 hackageLink pkg ver origin = case origin of
   OriginHackage         -> link
-  OriginDistribution    -> link
+  OriginDistribution _  -> link
   OriginSourceRepo{}    -> mempty
   OriginLocal{}         -> mempty
   OriginLocalTarball{}  -> mempty
@@ -154,7 +162,9 @@ originDetails url ref subdir =
 originChip :: PackageOrigin -> (Text, Text, Text)
 originChip = \case
   OriginHackage          -> ("hackage", "H", "Hackage")
-  OriginDistribution     -> ("distribution", "D", "GHC distribution (boot library)")
+  OriginDistribution Nothing  -> ("distribution", "D", "GHC distribution (boot library)")
+  OriginDistribution (Just p) ->
+    ("distribution", "D", "GHC package database, source in " <> Text.pack p)
   OriginLocal _          -> ("local",   "L", "Local package")
   OriginLocalTarball _   -> ("tarball", "T", "Local tarball")
   OriginRemoteTarball _  -> ("tarball", "T", "Remote tarball")

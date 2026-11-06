@@ -347,14 +347,35 @@ indexInputsFingerprint plan pid kind = do
       Nothing -> []
       Just u  -> puDeps u
 
--- | The source-tree digest of a unit the plan gives a directory for, and a
--- constant for one it does not.  Never resolves a package, so calling it
--- cannot trigger an extraction.
+-- | The source term of a unit's fingerprint, decided from its origin.
+--
+-- A local package and a @source-repository-package@ checkout can change
+-- under the same version, so their source tree is digested.  A
+-- distribution unit whose plan entry names a source directory is
+-- digested by that directory's /path/ without reading it: such a
+-- directory is immutable, so the path changes exactly when the contents
+-- do, and an index built from another source (Hackage's tarball, an
+-- unpatched tree) is rebuilt once the plan points elsewhere.  Every other
+-- unit gets a constant, its version being in the digest already.  Never
+-- resolves a package, so calling it cannot trigger an extraction.
 mutableSourceFingerprint :: BuildPlan -> PackageName -> IO Text
-mutableSourceFingerprint plan name =
-  case puSrcDir =<< lookupUnit name plan of
-    Just d  -> Fingerprint.componentFingerprint [d]
-    Nothing -> pure "immutable"
+mutableSourceFingerprint plan name = case lookupUnit name plan of
+  Nothing -> pure immutable
+  Just u  -> case puOrigin u of
+    OriginLocal _               -> walked u
+    OriginSourceRepo{}          -> walked u
+    OriginDistribution (Just d) ->
+      pure (Fingerprint.hashParts ["source-dir", Text.pack d])
+    OriginDistribution Nothing  -> pure immutable
+    OriginHackage               -> pure immutable
+    OriginLocalTarball _        -> pure immutable
+    OriginRemoteTarball _       -> pure immutable
+  where
+    immutable :: Text
+    immutable = "immutable"
+    walked u  = maybe (pure immutable)
+                      (Fingerprint.componentFingerprint . pure)
+                      (puSrcDir u)
 
 -- | The language settings, flattened for hashing.
 --

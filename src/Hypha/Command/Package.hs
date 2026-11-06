@@ -104,7 +104,9 @@ packageResultToJSON r = Aeson.object
 packageOriginToJSON :: PackageOrigin -> Value
 packageOriginToJSON = \case
   OriginHackage          -> Aeson.object [ "kind" .= ("hackage" :: Text) ]
-  OriginDistribution     -> Aeson.object [ "kind" .= ("distribution" :: Text) ]
+  OriginDistribution Nothing  -> Aeson.object [ "kind" .= ("distribution" :: Text) ]
+  OriginDistribution (Just p) -> Aeson.object
+    [ "kind" .= ("distribution" :: Text), "path" .= Text.pack p ]
   OriginLocal p          -> Aeson.object
     [ "kind" .= ("local" :: Text), "path" .= Text.pack p ]
   OriginLocalTarball p   -> Aeson.object

@@ -11,6 +11,8 @@ import System.IO.Temp (withSystemTempDirectory)
 
 import qualified Data.Map.Strict as Map
 
+import Data.Aeson qualified as Aeson
+import Hypha.Command.Package (packageOriginToJSON)
 import Hypha.Project.Discovery (DiscoveryError (..), cabalStoreBase)
 
 import Hypha.Types.BuildPlan
@@ -25,6 +27,7 @@ tests = testGroup "Unit.Project"
   , testDiscoveryIgnoresDotCabalDir
   , testStoreDirFromProjectFiles
   , testLoadBuildPlan
+  , testPreExistingSourceDirectory
   , testSourceRepoUnitsResolveToCheckout
   , testLoadPlanVersionsAgrees
   , testParseOverride
@@ -108,6 +111,41 @@ testLoadBuildPlan = testCase "loadBuildPlan parses fixture plan.json" $
           Nothing -> error "Expected a unit for mylib"
           Just pu -> puDistDir pu @?= Just
             ("test/fixtures/tiny-project/dist-newstyle/build/x86_64-linux/ghc-9.6.7/mylib-0.1.0")
+
+-- | A @pre-existing@ unit whose plan entry carries @pkg-src@ is a
+-- dependency from GHC's package database that says where its source
+-- sits.  It must neither become one of the project's own packages nor
+-- lose the directory; a @pre-existing@ unit without one is as before.
+testPreExistingSourceDirectory :: TestTree
+testPreExistingSourceDirectory =
+  testCase "loadBuildPlan reads pkg-src on a pre-existing unit as a distribution source directory" $
+    withSystemTempDirectory "hypha-plan" $ \cacheDir -> do
+      let fixtureDir = "test" </> "fixtures" </> "pre-existing-src"
+          srcDir     = fixtureDir </> "patched-dep"
+      result <- loadBuildPlan cacheDir (ProjectRoot fixtureDir)
+      case result of
+        Left err -> error ("Expected to parse plan, got: " ++ show err)
+        Right bp -> do
+          case lookupUnit (PackageName "patched-dep") bp of
+            Nothing -> error "Expected a unit for patched-dep"
+            Just pu -> do
+              puSrcDir pu   @?= Just srcDir
+              puIsLocal pu  @?= False
+              puOrigin pu   @?= OriginDistribution (Just srcDir)
+              -- The directory is read like any other source directory.
+              assertBool "its .cabal file is parsed for components"
+                (not (null (puLibComponents pu)))
+              packageOriginToJSON (puOrigin pu) @?= Aeson.object
+                [ "kind" Aeson..= ("distribution" :: String)
+                , "path" Aeson..= srcDir ]
+          -- A pre-existing unit with no pkg-src, and the project's own
+          -- package, keep the origins they had.
+          fmap puOrigin (lookupUnit (PackageName "base") bp)
+            @?= Just (OriginDistribution Nothing)
+          fmap puOrigin (lookupUnit (PackageName "app") bp)
+            @?= Just (OriginLocal (fixtureDir </> "app"))
+          fmap (packageOriginToJSON . puOrigin) (lookupUnit (PackageName "base") bp)
+            @?= Just (Aeson.object [ "kind" Aeson..= ("distribution" :: String) ])
 
 -- | A @source-repository-package@ unit's source is cabal's checkout under
 -- @dist-newstyle/src@, and the plan must say so, or the resolver falls

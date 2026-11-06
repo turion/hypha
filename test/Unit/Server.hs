@@ -34,7 +34,7 @@ import Hypha.Server.Ui.ModuleDoc (modulePage)
 import Hypha.Search.Query (QueryError (..))
 import Hypha.Server.Ui.Search
   ( highlightTokens, queryErrorFragment, resultsFragment, searchInput )
-import Hypha.Server.Ui.Tree (hackageLink, splitByOrigin)
+import Hypha.Server.Ui.Tree (hackageLink, originBadgeFull, splitByOrigin)
 import Hypha.Types.BuildPlan (PackageOrigin (..))
 
 mkIPv4 :: [Int] -> IP
@@ -50,6 +50,7 @@ tests = testGroup "Unit.Server"
   , testGroup "App.sanitizeSegments" sanitizeSegmentsTests
   , testGroup "App.mimeFor" mimeForTests
   , testGroup "Tree.splitByOrigin" splitByOriginTests
+  , testGroup "Tree.originBadgeFull" originBadgeTests
   , testGroup "Tree.hackageLink" hackageLinkTests
   , testGroup "Doc.symbolCard" symbolCardTests
   , testGroup "Search.highlightTokens" highlightTokensTests
@@ -92,11 +93,34 @@ splitByOriginTests =
   [ testCase "local packages land in the project group, rest are dependencies" $ do
       let local   = ("mine",  OriginLocal "/src/mine")
           hackage = ("aeson", OriginHackage)
-          dist    = ("base",  OriginDistribution)
+          dist    = ("base",  OriginDistribution Nothing)
           srp     = ("dep",   OriginSourceRepo Nothing Nothing Nothing)
       splitByOrigin [hackage, local, dist, srp]
         @?= ([local], [hackage, dist, srp])
+
+  , testCase "a distribution unit with a source directory is a dependency" $ do
+      let local = ("mine",    OriginLocal "/src/mine")
+          dist  = ("patched", OriginDistribution (Just "/nix/store/x-patched"))
+      splitByOrigin [dist, local] @?= ([local], [dist])
   ]
+
+originBadgeTests :: [TestTree]
+originBadgeTests =
+  [ testCase "a distribution unit without a directory keeps the boot-library label" $
+      renderBadge (OriginDistribution Nothing)
+        `shouldContain` "GHC distribution (boot library)"
+
+  , testCase "a distribution unit with a directory names it instead" $ do
+      let html = renderBadge (OriginDistribution (Just "/nix/store/x-patched"))
+      html `shouldContain` "/nix/store/x-patched"
+      assertBool "and is no boot library"
+        (not ("boot library" `Text.isInfixOf` html))
+  ]
+  where
+    renderBadge = LText.toStrict . renderText . originBadgeFull
+
+    shouldContain hay needle =
+      assertBool (show needle <> " not in " <> show hay) (needle `Text.isInfixOf` hay)
 
 hackageLinkTests :: [TestTree]
 hackageLinkTests =
@@ -107,8 +131,14 @@ hackageLinkTests =
   , testCase "distribution (boot) packages link too" $
       -- containers, base and every other boot library IS published on
       -- Hackage; withholding the link was the bug.
-      renderLink "containers" "0.7" OriginDistribution
+      renderLink "containers" "0.7" (OriginDistribution Nothing)
         `shouldContain` "https://hackage.haskell.org/package/containers-0.7"
+
+  , testCase "a distribution package with a source directory links too" $
+      -- The directory says where its source is, not whether Hackage lists
+      -- the version; a plan overlay gives most dependencies one.
+      renderLink "patched" "1.0" (OriginDistribution (Just "/nix/store/x-patched"))
+        `shouldContain` "https://hackage.haskell.org/package/patched-1.0"
 
   , testCase "local packages get no link" $
       renderLink "myapp" "0.1.0" (OriginLocal "/src/myapp") @?= ""

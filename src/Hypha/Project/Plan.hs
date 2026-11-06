@@ -313,7 +313,7 @@ toPlannedUnit unitIdToPkgId sourceCacheLookup checkouts ctx u = do
     , puUnitId        = unitIdOf u
     , puDeps          = deps
     , puIsLocal       = (CP.uType u == CP.UnitTypeLocal)
-    , puOrigin        = originFromPkgLoc (CP.uPkgSrc u)
+    , puOrigin        = originFromUnit (CP.uType u) (CP.uPkgSrc u)
     , puSrcDir        = srcDir
     , puDistDir       = CP.uDistDir u
     , puLibComponents = comps
@@ -420,12 +420,23 @@ readIfExists f = do
           hPutStrLn stderr ("warning: cannot read " <> f <> ": " <> show e)
           pure Nothing
 
+-- | A unit's origin from its type and source location.
+--
+-- A @pre-existing@ unit with a local source directory is still a
+-- dependency out of GHC's package database, which only says where its
+-- source sits; 'originFromPkgLoc' would take the same location for one of
+-- the project's own packages.
+originFromUnit :: CP.UnitType -> Maybe CP.PkgLoc -> PackageOrigin
+originFromUnit CP.UnitTypeBuiltin (Just (CP.LocalUnpackedPackage p)) =
+  OriginDistribution (Just p)
+originFromUnit _ loc = originFromPkgLoc loc
+
 -- | Map a @cabal-plan@ source location to our coarser 'PackageOrigin'.
 -- We do not surface 'OriginSourceRepo' metadata that the plan omits;
 -- if cabal didn't record a URL, neither do we.
 originFromPkgLoc :: Maybe CP.PkgLoc -> PackageOrigin
 originFromPkgLoc = \case
-  Nothing -> OriginDistribution
+  Nothing -> OriginDistribution Nothing
   Just (CP.LocalUnpackedPackage p) -> OriginLocal p
   Just (CP.LocalTarballPackage  p) -> OriginLocalTarball p
   Just (CP.RemoteTarballPackage (CP.URI u)) -> OriginRemoteTarball u

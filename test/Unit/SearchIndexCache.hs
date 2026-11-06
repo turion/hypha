@@ -10,12 +10,14 @@ module Unit.SearchIndexCache (tests) where
 import qualified Data.IORef as IORef
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
+import           Data.Text (Text)
 import qualified Database.SQLite.Simple as Sql
+import           System.Directory (createDirectoryIfMissing, removeFile)
 import           System.FilePath ((</>))
 import           System.IO.Temp (withSystemTempDirectory)
 
 import Test.Tasty       (TestTree, testGroup)
-import Test.Tasty.HUnit (testCase, (@?=))
+import Test.Tasty.HUnit (assertBool, testCase, (@?=))
 
 import Hypha.Search.Cache (openIndexCache, readIndex, writeIndex)
 import Hypha.Search.Exports (Export (..), ExportChoice (..), lookupExport)
@@ -46,6 +48,27 @@ wrapperRow = rowIn
   "containers" "Data.Map.Strict" "insertWith"
   "insertWith :: Ord k => (a -> a -> a) -> k -> a -> Map k a -> Map k a"
   "Data.Map.Strict.Internal" Exposed
+
+-- | The inputs fingerprint of a one-unit plan whose unit has this origin
+-- and source directory.  Nothing else differs between two calls, so a
+-- difference between their results is the source term's.
+fingerprint :: PackageOrigin -> Maybe FilePath -> IO Text
+fingerprint origin srcDir =
+  indexInputsFingerprint plan pid MainLib
+  where
+    pid  = PackageId (PackageName "dep") (Version "1.0")
+    plan = emptyBuildPlan
+      { bpUnits = Map.singleton (PackageName "dep") PlannedUnit
+          { puId            = pid
+          , puUnitId        = unpinnedUnitIdFor pid
+          , puDeps          = []
+          , puIsLocal       = False
+          , puOrigin        = origin
+          , puSrcDir        = srcDir
+          , puDistDir       = Nothing
+          , puLibComponents = []
+          }
+      }
 
 tests :: TestTree
 tests = testGroup "Unit.SearchIndexCache"
@@ -103,6 +126,50 @@ tests = testGroup "Unit.SearchIndexCache"
         rows <- readIndex c2 "containers" "0.7" cfg
         rows @?= [wrapperRow]
 
+  , testGroup "the source term of the inputs fingerprint"
+      [ testCase "a distribution unit's directory is fingerprinted by path, unread" $
+          withSystemTempDirectory "hypha-fp" $ \dir -> do
+            let one = dir </> "one"
+                two = dir </> "two"
+            mapM_ (createDirectoryIfMissing True) [one, two]
+            before  <- fingerprint (OriginDistribution (Just one)) (Just one)
+            -- Contents are not read: a store path changes with them.
+            writeFile (one </> "New.hs") "module New where\n"
+            after   <- fingerprint (OriginDistribution (Just one)) (Just one)
+            after @?= before
+            -- The path is: an index built from another source is stale.
+            moved   <- fingerprint (OriginDistribution (Just two)) (Just two)
+            assertBool "another directory changes the fingerprint" (moved /= before)
+            -- ... and so is having none, which Hackage's tarball is.
+            without <- fingerprint (OriginDistribution Nothing) Nothing
+            assertBool "no directory changes the fingerprint" (without /= before)
+
+      , testCase "a local package's and a source-repository checkout's tree is walked" $
+          withSystemTempDirectory "hypha-fp" $ \dir -> do
+            let origins =
+                  [ OriginLocal dir
+                  , OriginSourceRepo Nothing Nothing Nothing ]
+            mapM_ (\origin -> do
+                     before <- fingerprint origin (Just dir)
+                     writeFile (dir </> "Edit.hs") "module Edit where\n"
+                     after  <- fingerprint origin (Just dir)
+                     assertBool "an edit under the directory changes the fingerprint"
+                       (after /= before)
+                     removeFile (dir </> "Edit.hs"))
+                  origins
+
+      , testCase "every other unit gets a constant, directory or not" $
+          withSystemTempDirectory "hypha-fp" $ \dir -> do
+            plain <- fingerprint OriginHackage Nothing
+            mapM_ (\origin -> do
+                     writeFile (dir </> "Edit.hs") "module Edit where\n"
+                     fp <- fingerprint origin (Just dir)
+                     fp @?= plain)
+                  [ OriginHackage, OriginLocalTarball "/t.tar.gz"
+                  , OriginRemoteTarball "https://x/t.tar.gz"
+                  , OriginDistribution Nothing ]
+      ]
+
   , testCase "hydration hands back an environment the next unit can resolve against" $
       -- A warm cache holding ghc-internal is exactly how base becomes
       -- resolvable in a run that only rebuilds base.
@@ -122,7 +189,7 @@ tests = testGroup "Unit.SearchIndexCache"
                   , puUnitId        = unpinnedUnitIdFor pid
                   , puDeps          = []
                   , puIsLocal       = False
-                  , puOrigin        = OriginDistribution
+                  , puOrigin        = OriginDistribution Nothing
                   , puSrcDir        = Nothing
                   , puDistDir       = Nothing
                   , puLibComponents = []

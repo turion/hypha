@@ -76,10 +76,14 @@ data PackageOrigin
     -- ^ Locally-stored tarball (uncommon).
   | OriginRemoteTarball !Text
     -- ^ Arbitrary remote tarball URL (uncommon).
-  | OriginDistribution
-    -- ^ Plan entry without a @pkg-src@ block — typically @base@,
-    -- @ghc-prim@ and other libraries shipped with the GHC
-    -- distribution.
+  | OriginDistribution !(Maybe FilePath)
+    -- ^ A @pre-existing@ unit: a dependency taken from GHC's package
+    -- database rather than built by cabal.  Without a @pkg-src@ block
+    -- — typically @base@, @ghc-prim@ and other libraries shipped with
+    -- the GHC distribution — there is no directory.  When the plan
+    -- does name one, the field is the directory its (immutable) source
+    -- sits in; such a unit is still a dependency, never one of the
+    -- project's own packages.
   deriving stock (Show, Eq, Ord)
 
 -- | A planned unit with its dependencies and metadata.
@@ -176,7 +180,7 @@ applyOverrides overrides bp = bp
         PlannedUnit { puId = PackageId n v
                     , puUnitId = unpinnedUnitId n v
                     , puDeps = [], puIsLocal = False
-                    , puOrigin = OriginDistribution
+                    , puOrigin = OriginDistribution Nothing
                     , puSrcDir = Nothing, puDistDir = Nothing
                     , puLibComponents = [] }
 
