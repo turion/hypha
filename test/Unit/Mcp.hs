@@ -30,7 +30,7 @@ tests = testGroup "Mcp"
 
 testExecEcho :: IO ()
 testExecEcho = do
-  (ec, out, _err) <- execHypha "/bin/echo" ["hello"]
+  (ec, out, _err) <- execHypha "echo" ["hello"]
   case ec of
     ExitSuccess   -> pure ()
     ExitFailure _ -> fail ("expected exit 0, got: " ++ show ec)
