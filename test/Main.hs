@@ -19,6 +19,7 @@ import qualified Property.HackageCache
 import qualified Property.HaddockModuleHeader
 import qualified Property.HaddockRewrite
 import qualified Property.OutputJson
+import qualified Property.PlanOverlay
 import qualified Property.SearchRanking
 import qualified Property.SymbolPath
 import qualified Unit.BuildEnv
@@ -38,6 +39,7 @@ import qualified Unit.HoogleLocalGen
 import qualified Unit.GhcIncludes
 import qualified Unit.HoogleRemote
 import qualified Unit.PackageCacheLookup
+import qualified Unit.PlanOverlay
 import qualified Unit.Module
 import qualified Unit.Project
 import qualified Unit.Server
@@ -95,6 +97,7 @@ allTests = testGroup "hypha"
   , Property.SymbolPath.tests
   , Property.HackageCache.tests
   , Property.OutputJson.tests
+  , Property.PlanOverlay.tests
   , Unit.BuildEnv.tests
   , Unit.BuildEnvCompose.tests
   , Unit.BuildPlanOrder.tests
@@ -113,6 +116,7 @@ allTests = testGroup "hypha"
   , Unit.GhcIncludes.tests
   , Unit.HoogleRemote.tests
   , Unit.PackageCacheLookup.tests
+  , Unit.PlanOverlay.tests
   , Unit.Module.tests
   , Unit.Server.tests
   , Unit.ServerSlots.tests

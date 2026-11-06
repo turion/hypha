@@ -81,6 +81,7 @@ library
     Hypha.Project.BuildContext
     Hypha.Project.Components
     Hypha.Project.Plan
+    Hypha.Project.PlanOverlay
     Hypha.Project.Overrides
     Hypha.Cache
     Hypha.Hackage.Types
@@ -232,6 +233,7 @@ test-suite hypha-tests
     Property.LookupOutcomeShape
     Property.HackageCache
     Property.OutputJson
+    Property.PlanOverlay
     Property.SearchRanking
     Property.SymbolPath
     Unit.BuildEnv
@@ -260,6 +262,7 @@ test-suite hypha-tests
     Unit.HoogleLocalGen
     Unit.HoogleRemote
     Unit.PackageCacheLookup
+    Unit.PlanOverlay
     Unit.InternalError
     Unit.ImportedSources
     Unit.LookupPrepLocal
@@ -287,6 +290,7 @@ test-suite hypha-tests
     , base
     , bytestring
     , Cabal-syntax
+    , cabal-plan
     , containers
     , directory
     , filepath
