@@ -140,20 +140,13 @@ checkPlanOverlay setting mRoot = case (setting, mRoot) of
   where
     -- The file alone, since it cannot be merged into a plan.
     judgeAlone :: Text -> IO CheckResult
-    judgeAlone why = chosenFile >>= \case
+    judgeAlone why = chosenOverlay setting mRoot >>= \case
       Nothing -> pure (noOverlay mRoot)
       Just (source, file) -> do
         read' <- readPlanOverlay file
         pure $ case read' of
           Left oe -> overlayFailed source oe
           Right overlay -> judgeUnapplied source file overlay why
-
-    -- With a root, the file 'loadMergedPlan' would have chosen; without
-    -- one only a file named explicitly can be known.
-    chosenFile = case (setting, mRoot) of
-      (_, Just root)                -> chosenOverlay setting root
-      (OverlayFile how f, Nothing)  -> pure (Just (OverlayExplicit how, f))
-      (_, Nothing)                  -> pure Nothing
 
 -- | Nothing names an overlay.
 noOverlay :: Maybe ProjectRoot -> CheckResult

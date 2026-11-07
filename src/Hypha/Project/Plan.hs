@@ -209,7 +209,7 @@ loadMergedPlan setting root@(ProjectRoot rootDir) = runExceptT $ do
     try @IO @IOException $ do
       planPath <- CP.findPlanJson (CP.ProjectRelativeToDir rootDir)
       (planPath,) <$> CP.decodePlanJson planPath
-  chosen <- liftIO (chosenOverlay setting root)
+  chosen <- liftIO (chosenOverlay setting (Just root))
   case chosen of
     Nothing -> pure (MergedPlan pj planPath Nothing)
     Just (source, file) -> do
@@ -218,12 +218,19 @@ loadMergedPlan setting root@(ProjectRoot rootDir) = runExceptT $ do
       let (merged, report) = applyPlanOverlay overlay pj
       pure (MergedPlan merged planPath (Just (AppliedOverlay source file report)))
 
--- | The overlay file to read, and where it came from, if any.
-chosenOverlay :: OverlaySetting -> ProjectRoot -> IO (Maybe (OverlaySource, FilePath))
-chosenOverlay setting root = case setting of
-  OverlayFile how f  -> pure (Just (OverlayExplicit how, f))
-  OverlayMissing{}   -> pure Nothing
-  OverlayUnset       -> do
+-- | The overlay file to read, and where it came from, if any.  The one
+-- place that decides, so plan loading and @hypha doctor@ agree.
+--
+-- Only the default file needs a project root to be found: without one, a
+-- file named explicitly is still the one in use and 'OverlayUnset' yields
+-- none.
+chosenOverlay
+  :: OverlaySetting -> Maybe ProjectRoot -> IO (Maybe (OverlaySource, FilePath))
+chosenOverlay setting mRoot = case (setting, mRoot) of
+  (OverlayFile how f, _)      -> pure (Just (OverlayExplicit how, f))
+  (OverlayMissing{}, _)       -> pure Nothing
+  (OverlayUnset, Nothing)     -> pure Nothing
+  (OverlayUnset, Just root)   -> do
     let f = defaultOverlayPath root
     exists <- doesFileExist f
     pure (if exists then Just (OverlayDefault, f) else Nothing)
