@@ -15,6 +15,7 @@ module Hypha.Project.Plan
   , defaultOverlayPath
   , chosenOverlay
   , renderOverlaySource
+  , renderOverlayFailure
     -- * Loading
   , MergedPlan (..)
   , AppliedOverlay (..)
@@ -55,7 +56,8 @@ import Hypha.Project.BuildContext (BuildContext (..))
 import qualified Hypha.Project.Components as Comp
 import qualified Hypha.Project.GhcIncludes as Inc
 import Hypha.Project.PlanOverlay
-  ( OverlayError, OverlayReport, applyPlanOverlay, readPlanOverlay )
+  ( OverlayError, OverlayReport, applyPlanOverlay, overlayErrorPath
+  , readPlanOverlay, renderOverlayError )
 import qualified Hypha.Source.CppMacros as Cpp
 import Hypha.Types.BuildPlan
   ( BuildPlan (..), CompilerId (..), PackageOrigin (..), PlannedUnit (..)
@@ -161,6 +163,14 @@ renderOverlaySource = \case
   OverlayExplicit ByFlag        -> "--plan-overlay"
   OverlayExplicit ByEnvironment -> "HYPHA_PLAN_OVERLAY"
   OverlayDefault                -> "default path"
+
+-- | An overlay that could not be read or understood: the file, who named
+-- it, and why.  The one text @hypha@ and @hypha doctor@ both print.
+renderOverlayFailure :: OverlaySource -> OverlayError -> Text
+renderOverlayFailure source oe =
+  "plan overlay " <> Text.pack (overlayErrorPath oe)
+    <> " (from " <> renderOverlaySource source <> "): "
+    <> renderOverlayError oe
 
 -- | A decoded @plan.json@ with the plan overlay in use merged in.
 data MergedPlan = MergedPlan

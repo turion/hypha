@@ -1,4 +1,5 @@
 {-# LANGUAGE DerivingStrategies #-}
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE OverloadedStrings #-}
 -- | A /plan overlay/: the @pkg-src@ of units whose source @plan.json@ does
 -- not name, supplied in a file of its own and merged into the decoded plan.
@@ -21,6 +22,8 @@ module Hypha.Project.PlanOverlay
   ( -- * The overlay
     PlanOverlay (..)
   , OverlayError (..)
+  , overlayErrorPath
+  , renderOverlayError
   , readPlanOverlay
   , decodePlanOverlay
     -- * Merging
@@ -39,6 +42,8 @@ import qualified Data.List.NonEmpty as NE
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Set (Set)
+import Data.Text (Text)
+import qualified Data.Text as Text
 
 import qualified Cabal.Plan as CP
 
@@ -62,6 +67,22 @@ data OverlayError
     -- ^ Two or more entries share an id; lists each such id once,
     -- ascending.
   deriving stock (Show, Eq)
+
+-- | The overlay file an 'OverlayError' is about.
+overlayErrorPath :: OverlayError -> FilePath
+overlayErrorPath = \case
+  OverlayUnreadable   f _ -> f
+  OverlayMalformed    f _ -> f
+  OverlayDuplicateIds f _ -> f
+
+-- | Why an overlay could not be used; the file is named by the caller.
+renderOverlayError :: OverlayError -> Text
+renderOverlayError = \case
+  OverlayUnreadable   _ e   -> "cannot read the file: " <> Text.pack (show e)
+  OverlayMalformed    _ msg -> "malformed: " <> Text.pack msg
+  OverlayDuplicateIds _ ids ->
+    "more than one entry for the same unit id: "
+      <> Text.intercalate ", " [ uid | CP.UnitId uid <- NE.toList ids ]
 
 -- | One entry of the overlay's @install-plan@ array, before the entries
 -- are checked for duplicate ids.

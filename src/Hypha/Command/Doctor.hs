@@ -33,13 +33,12 @@ import Data.Text qualified as Text
 import Data.Text (Text)
 import Cabal.Plan qualified as CP
 import Hypha.Cli.Types
-import Hypha.Error
-  ( HyphaError (..), errorMessage, overlayErrorPath, renderOverlayError )
+import Hypha.Error (HyphaError (..), errorMessage)
 import Hypha.Output.Outcome (Outcome, successOutcome)
 import Hypha.Project.Plan
   ( AppliedOverlay (..), MergedPlan (..), OverlaySetting (..)
   , OverlaySource (..), PlanError (..), chosenOverlay, defaultOverlayPath
-  , loadMergedPlan, renderOverlaySource )
+  , loadMergedPlan, renderOverlayFailure, renderOverlaySource )
 import Hypha.Project.PlanOverlay
   ( EntryOutcome (..), OverlayError, OverlayReport (..), PlanOverlay (..)
   , readPlanOverlay )
@@ -169,10 +168,7 @@ noOverlay = CheckPass . \case
 -- | An overlay that could not be read or understood: the file, who named
 -- it, and why.
 overlayFailed :: OverlaySource -> OverlayError -> CheckResult
-overlayFailed source oe = CheckFail $
-  "plan overlay " <> Text.pack (overlayErrorPath oe)
-    <> " (from " <> renderOverlaySource source <> "): "
-    <> renderOverlayError oe
+overlayFailed source oe = CheckFail (renderOverlayFailure source oe)
 
 -- | An overlay merged into @plan.json@: what it sourced, what it did not
 -- apply, and which @pre-existing@ units it left without a source.

@@ -14,14 +14,9 @@ module Hypha.Error
   , errorMessage
   , errorExitCode
   , errorActions
-    -- * Plan overlay
-  , overlayErrorPath
-  , renderOverlayError
   ) where
 
-import Cabal.Plan (UnitId (..))
 import Data.Char (isAlphaNum)
-import Data.Foldable (toList)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -38,8 +33,9 @@ import Hypha.Hoogle.Tier (Tier, renderTierList)
 import Hypha.Hoogle.Type (HoogleQuery (..))
 import Hypha.Project.Discovery (DiscoveryError (..))
 import Hypha.Project.Overrides (OverrideError, renderOverrideError)
-import Hypha.Project.Plan (PlanError (..), renderOverlaySource)
-import Hypha.Project.PlanOverlay (OverlayError (..))
+import Hypha.Project.Plan
+  ( PlanError (..), renderOverlayFailure, renderOverlaySource )
+import Hypha.Project.PlanOverlay (OverlayError (..), overlayErrorPath)
 import Hypha.Server.Bind (BindError, renderBindError)
 import Hypha.Source.Reach
   ( ReachGap, SymbolSearchFailure (..), renderReachGap
@@ -245,10 +241,7 @@ errorMessage = \case
       <> " (cabal-plan: " <> Text.pack pth <> ")"
       <> "; run `cabal build --dry-run`"
     PlanParseFailure m -> "plan.json parse failure: " <> Text.pack m
-    PlanOverlayFailure source oe ->
-      "plan overlay " <> Text.pack (overlayErrorPath oe)
-        <> " (from " <> renderOverlaySource source <> "): "
-        <> renderOverlayError oe
+    PlanOverlayFailure source oe -> renderOverlayFailure source oe
   HoogleOffline      _ _ ->
     "--offline: no cached answer for this query and the network is disabled"
   HoogleNotFound     _ _ ->
@@ -318,22 +311,6 @@ errorActions = \case
     , ("plan_overlay_source", renderOverlaySource source)
     ]
   _ -> Map.empty
-
--- | The overlay file an 'OverlayError' is about.
-overlayErrorPath :: OverlayError -> FilePath
-overlayErrorPath = \case
-  OverlayUnreadable   f _ -> f
-  OverlayMalformed    f _ -> f
-  OverlayDuplicateIds f _ -> f
-
--- | Why an overlay could not be used; the file is named by the caller.
-renderOverlayError :: OverlayError -> Text
-renderOverlayError = \case
-  OverlayUnreadable   _ e   -> "cannot read the file: " <> Text.pack (show e)
-  OverlayMalformed    _ msg -> "malformed: " <> Text.pack msg
-  OverlayDuplicateIds _ ids ->
-    "more than one entry for the same unit id: "
-      <> Text.intercalate ", " [ uid | UnitId uid <- toList ids ]
 
 -- | A @hypha lookup@ command line an agent (or a shell) can run
 -- verbatim.  Type-signature queries contain spaces, @>@ and @|@, so an
