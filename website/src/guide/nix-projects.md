@@ -58,8 +58,11 @@ nothing is reported when it does not.
 
 ### What the merge does
 
-The overlay is merged into the plan by unit id, before any command reads the
-plan.
+The overlay is merged into the plan by unit id whenever `hypha` loads the
+build plan, which is where every source, module and component comes from. The
+one reader of `plan.json` that does not apply it is the version check behind
+`hypha lookup`: it reads only versions and unit ids, and an overlay changes
+neither.
 
 - A unit sourced this way **stays a dependency**: it is not a local package,
   `hypha package` reports its origin as `distribution` with the path, and the
@@ -92,7 +95,31 @@ Pass the project's **dependencies**, not the project. The helper closes its
 list over library dependencies only, and builds every derivation it is given,
 so passing the project would build it, tests included, to produce entries
 that are never applied, and would still miss the dependencies of its test
-suite. A project's dependencies of every kind are in its `getCabalDeps`:
+suite. A project's dependencies of every kind are in its `getCabalDeps`.
+
+Build the overlay from **the package set your shell is built with**, overrides
+included. Keep that set in one file that the shell and the overlay both import,
+so there is never a second copy of your overrides to fall out of step:
+
+```nix
+# haskell-packages.nix
+{ pkgs }:
+pkgs.haskellPackages.override {
+  overrides = final: prev: {
+    myproj = final.callCabal2nix "myproj" ./. { };
+    # …your patched and re-pinned dependencies, and any other overrides
+  };
+}
+```
+
+```nix
+# shell.nix
+let
+  pkgs = import <nixpkgs> { };
+  haskellPackages = import ./haskell-packages.nix { inherit pkgs; };
+in
+haskellPackages.shellFor { packages = p: [ p.myproj ]; }
+```
 
 ```nix
 # overlay.nix
@@ -101,15 +128,19 @@ let
   hypha = builtins.fetchTarball
     "https://github.com/well-typed/hypha/archive/<revision>.tar.gz";
 
-  myproj = pkgs.haskellPackages.callCabal2nix "myproj" ./. { };
+  haskellPackages = import ./haskell-packages.nix { inherit pkgs; };
+  myproj = haskellPackages.myproj;
 
   # getCabalDeps lists only the kinds the derivation was built for: tests
   # with doCheck, benchmarks with doBenchmark. `or [ ]` skips the others.
+  # setupHaskellDepends are the dependencies of a `custom-setup` stanza,
+  # which shellFor puts into the shell as well.
   kinds = [
     "libraryHaskellDepends"
     "executableHaskellDepends"
     "testHaskellDepends"
     "benchmarkHaskellDepends"
+    "setupHaskellDepends"
   ];
 in
 import "${hypha}/nix/plan-overlay.nix" {
@@ -126,6 +157,18 @@ The result is the file `hypha` finds by default in the project root. A
 dependency that nixpkgs does not have as a derivation, which is what GHC's
 boot packages are (`base`, `containers`, `text`, …), gets no entry.
 
+**An overlay built from any other package set is wrong without saying so.** A
+dependency you patched or re-pinned at the same version keeps its unit id,
+because Cabal derives the id only from the package id, the ids of its
+dependencies and the flags, and nixpkgs passes no `--ipid`. The overlay built from
+a set without your patch therefore matches your shell's ids and points at the
+unpatched source, and [`hypha doctor`](#what-hypha-doctor-reports) passes: it
+sees only that every id is covered.
+
+`getCabalDeps` is not a public interface. nixpkgs says of it, in
+`generic-builder.nix`, that it is "intended just for `shellFor`" and "should be
+considered unstable", so a change in nixpkgs may break this idiom.
+
 ### Through the flake
 
 `hypha`'s flake exports the same function as `lib.planOverlay`, so a flake
@@ -138,14 +181,25 @@ that has `hypha` as an input does not need to fetch the source itself:
   outputs = { self, nixpkgs, hypha, ... }:
     let
       pkgs = import nixpkgs { system = "x86_64-linux"; };
-      myproj = pkgs.haskellPackages.callCabal2nix "myproj" ./. { };
+      # One package set, overrides included, for the shell and the overlay.
+      haskellPackages = pkgs.haskellPackages.override {
+        overrides = final: prev: {
+          myproj = final.callCabal2nix "myproj" ./. { };
+          # …your patched and re-pinned dependencies, and any other overrides
+        };
+      };
+      myproj = haskellPackages.myproj;
       kinds = [
         "libraryHaskellDepends"
         "executableHaskellDepends"
         "testHaskellDepends"
         "benchmarkHaskellDepends"
+        "setupHaskellDepends"
       ];
     in {
+      devShells.x86_64-linux.default =
+        haskellPackages.shellFor { packages = p: [ p.myproj ]; };
+
       packages.x86_64-linux.plan-overlay = hypha.lib.planOverlay {
         inherit pkgs;
         packages = builtins.concatMap (kind: myproj.getCabalDeps.${kind} or [ ]) kinds;
@@ -158,15 +212,19 @@ that has `hypha` as an input does not need to fetch the source itself:
 $ nix build .#plan-overlay -o hypha-plan-overlay.json
 ```
 
-The `pkgs` is yours, so the sources are those of the package set you build
-with, not of a nixpkgs `hypha` was tested against.
+The helper takes only `runCommand`, `srcOnly`, `jq` and `lib` from `pkgs`; the
+sources and unit ids come from the derivations you pass as `packages`, so they
+are those of the package set you took them from, not of a nixpkgs `hypha` was
+tested against.
 
 ### Keeping it current
 
 An overlay describes one package set. Rebuild it whenever any package's
 source changes, with the same `nix-build … -o hypha-plan-overlay.json`.
-Building it from the same expression as your shell (one file defining both)
-lets one command refresh both.
+Building it from the same expression as your shell, as above, is what keeps its
+sources right: an overlay built from a different set can point a patched
+dependency at the wrong source and nothing will say so. It also lets one
+command refresh both.
 
 [`hypha doctor`](#what-hypha-doctor-reports) names the dependencies the
 overlay left without a source, which catches a changed version or a changed

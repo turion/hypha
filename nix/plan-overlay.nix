@@ -7,9 +7,19 @@
 # unpacked and patched source in the nix store.
 #
 #     import "${src}/nix/plan-overlay.nix" {
-#       pkgs = import <nixpkgs> {};          # the caller's own package set
-#       packages = [ pkgs.haskellPackages.aeson ];
+#       pkgs = import <nixpkgs> {};          # only runCommand, srcOnly, jq, lib
+#       packages = [ haskellPackages.aeson ]; # the shell's own package set
 #     }
+#
+# The sources and unit ids come from the derivations in `packages`, not from
+# `pkgs`: build them from the package set your shell is built with, overrides
+# included. A dependency patched or re-pinned at the same version keeps its
+# unit id, so an overlay built from a set without the patch points at the
+# unpatched source and nothing reports it.
+#
+# nixpkgs calls `getCabalDeps`, which `isHaskellPackage` and `libraryDeps` below
+# read, unstable and meant just for `shellFor`, so a nixpkgs change may break
+# this idiom.
 #
 # The result is a derivation whose output is the overlay JSON file itself:
 #
