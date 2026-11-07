@@ -6,6 +6,7 @@ These apply to every subcommand and are given before or after the command.
 |------|-------------|
 | `--project-dir DIR` | Override project root |
 | `--package-override PKG=VER` | Replace a plan entry (repeatable) |
+| `--plan-overlay FILE` | Plan overlay giving `pkg-src` for plan units that have none, such as a nix-provided dependency (default: `$HYPHA_PLAN_OVERLAY`, then `<project root>/hypha-plan-overlay.json`); see [Nix Projects](nix-projects.md) |
 | `--offline` | Disable network access; a remote-Hoogle answer cached by a previous online `lookup` is still served, only the request is skipped (fails only if nothing is cached) |
 | `--json` | Emit the JSON envelope instead of YAML (the default) |
 | `--pretty-json` | Indent JSON output |
@@ -52,3 +53,8 @@ parse. `--json` switches to a JSON envelope for machine pipelines;
   ```
 
 See [Caching](caching.md) for what `--cache-dir` and `--offline` control.
+
+## Environment
+
+- **`HYPHA_PLAN_OVERLAY`** names the plan overlay when `--plan-overlay` is not
+  given; an empty value counts as unset. See [Nix Projects](nix-projects.md).

@@ -25,6 +25,10 @@ cabal build all
 There is no packaged `hypha` derivation yet, so `nix run` has nothing to
 run — build it from the shell above.
 
+To browse a project whose dependencies come from nixpkgs, see
+**[Nix Projects](../guide/nix-projects.md)**: the flake also exports a helper
+that writes the file telling `hypha` where those dependencies' source lives.
+
 ## Claude Code plugin
 
 If you drive Claude Code, install the bundled plugin so Claude prefers

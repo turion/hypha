@@ -14,6 +14,7 @@
 - [Subcommands](guide/subcommands.md)
 - [Looking Up Symbols](guide/lookup.md)
 - [Global Flags](guide/flags.md)
+- [Nix Projects](guide/nix-projects.md)
 - [Exit Codes](guide/exit-codes.md)
 - [Caching](guide/caching.md)
 
