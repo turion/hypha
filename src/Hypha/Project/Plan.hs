@@ -13,6 +13,7 @@ module Hypha.Project.Plan
   , resolveOverlaySetting
   , warnOverlayMissing
   , defaultOverlayPath
+  , chosenOverlay
   , renderOverlaySource
     -- * Loading
   , MergedPlan (..)

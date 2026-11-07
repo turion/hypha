@@ -14,6 +14,9 @@ module Hypha.Error
   , errorMessage
   , errorExitCode
   , errorActions
+    -- * Plan overlay
+  , overlayErrorPath
+  , renderOverlayError
   ) where
 
 import Cabal.Plan (UnitId (..))

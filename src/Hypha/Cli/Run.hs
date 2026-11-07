@@ -139,19 +139,25 @@ mkHackageClientForOpts = do
       mgr <- newManager tlsManagerSettings
       mkHackageClient mgr hackCache
 
+-- | The project root, or 'Nothing' after announcing on @stderr@ why
+-- discovery failed.  For the commands that still answer outside a project.
+discoverRootOrWarn :: Hypha (Maybe ProjectRoot)
+discoverRootOrWarn = do
+  opts <- askOpts
+  liftIO $ warnOnLeft
+    (errorMessage . DiscoveryFailure)
+    Nothing
+    (fmap Just <$> discoverProjectRoot (hoProjectDir opts))
+
 -- | Best-effort project + plan loader.  Each failure is announced on
 -- @stderr@ before the degraded fallback kicks in — no @Left _ -> ...@
 -- silent ignore.  Returns 'Nothing' for the project root when
 -- discovery failed, and 'emptyBuildPlan' when plan loading failed.
 loadProjectAndPlan :: Hypha (Maybe ProjectRoot, BuildPlan)
 loadProjectAndPlan = do
-  opts      <- askOpts
   cacheRoot <- asks heCacheDir
   overlay   <- asks heOverlay
-  mRoot <- liftIO $ warnOnLeft
-             (errorMessage . DiscoveryFailure)
-             Nothing
-             (fmap Just <$> discoverProjectRoot (hoProjectDir opts))
+  mRoot     <- discoverRootOrWarn
   plan <- liftIO $
     maybe (pure emptyBuildPlan) (loadPlanOrWarn cacheRoot overlay) mRoot
   pure (mRoot, plan)
@@ -358,8 +364,10 @@ runClientCommand = \case
     (_, plan) <- loadPlan
     liftIO (Deps.runDeps plan pkgName reverseMode mDepth)
 
-  DoctorCommand ->
-    liftIO Doctor.runDoctor
+  DoctorCommand -> do
+    overlay <- asks heOverlay
+    mRoot   <- discoverRootOrWarn
+    liftIO (Doctor.runDoctor overlay mRoot)
 
 -- | Parse @PKG/MOD@, throwing 'UserError' on malformed input.
 parsePkgMod :: MonadError HyphaError m => Text -> m (Text, Text)
@@ -472,10 +480,7 @@ runLookupCommand q = do
   opts <- askOpts
   cacheRoot <- asks heCacheDir
   overlay   <- asks heOverlay
-  mRoot <- liftIO $ warnOnLeft
-             (errorMessage . DiscoveryFailure)
-             Nothing
-             (fmap Just <$> discoverProjectRoot (hoProjectDir opts))
+  mRoot     <- discoverRootOrWarn
   cache <- liftIO $ PC.openPackageCache mRoot
   dotHypha <- liftIO $ case mRoot of
     Just (ProjectRoot r) -> do
