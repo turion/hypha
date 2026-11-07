@@ -27,11 +27,17 @@ import qualified Data.Aeson.KeyMap          as KeyMap
 import qualified Data.ByteString.Lazy.Char8 as LBS8
 import           Data.Text                  (Text)
 import qualified Data.Text                  as Text
-import           System.Directory           (copyFile, createDirectoryIfMissing)
+import           Data.Char                  (toLower)
+import           Data.List                  (isInfixOf)
+import           System.Directory
+  ( copyFile, createDirectoryIfMissing, doesDirectoryExist, listDirectory )
+import           System.Environment         (getEnvironment)
 import           System.Exit                (ExitCode (..))
 import           System.FilePath            ((</>))
 import           System.IO.Temp             (withSystemTempDirectory)
-import           System.Process             (readProcessWithExitCode)
+import           System.Process
+  ( CreateProcess (..), proc, readCreateProcessWithExitCode
+  , readProcessWithExitCode )
 
 import Test.Tasty       (TestTree, testGroup)
 import Test.Tasty.HUnit (assertBool, assertEqual, assertFailure, testCase)
@@ -151,9 +157,167 @@ tests = testGroup "Golden.Cli"
       assertBool
         ("expected the module_absent verdict; got:\n" <> out)
         ("module_absent" `isInfixOfStr` out)
+
+  , testGroup "plan overlay" overlayTests
   ]
   where
     facadeProject = "test/fixtures/facade-project"
+
+-- | The plan overlay, through the binary: how it is found, what a missing
+-- or broken file does, and that a dependency the plan lists without a
+-- source is then read from where the overlay says.
+--
+-- @store-dep@ is a @pre-existing@ unit with no @pkg-src@ in the fixture's
+-- plan.  Everything below runs @--offline@ with a fresh @--cache-dir@, so
+-- an answer that came from a download, or left a copy of one under the
+-- cache, would show.
+overlayTests :: [TestTree]
+overlayTests =
+  [ testCase "hypha source reads a dependency from the overlay's directory, with no download" $
+      withSystemTempDirectory "hypha-overlay-cache" $ \cache -> do
+        (ec, out, err) <- hyphaWith [] cache
+          [ "--json", "--offline", "--project-dir", overlayProject
+          , "--plan-overlay", overlayFile, "source", "store-dep/StoreDep.Hello" ]
+        assertEqual ("exit code (stderr: " <> err <> ")") ExitSuccess ec
+        assertBool ("expected a path inside the overlay's directory; got:\n" <> out)
+          (overlayStoreDep `isInfixOf` out)
+        assertNothingCached cache
+
+  , testCase "HYPHA_PLAN_OVERLAY names the overlay when no flag does" $
+      withSystemTempDirectory "hypha-overlay-cache" $ \cache -> do
+        (ec, out, err) <- hyphaWith [("HYPHA_PLAN_OVERLAY", overlayFile)] cache
+          [ "--json", "--offline", "--project-dir", overlayProject
+          , "source", "store-dep/StoreDep.Hello" ]
+        assertEqual ("exit code (stderr: " <> err <> ")") ExitSuccess ec
+        assertBool ("expected a path inside the overlay's directory; got:\n" <> out)
+          (overlayStoreDep `isInfixOf` out)
+        assertNothingCached cache
+
+  , testCase "the flag wins over the variable" $
+      withSystemTempDirectory "hypha-overlay-cache" $ \cache -> do
+        -- The variable names a file that does not exist: were it consulted
+        -- there would be a warning, and were it preferred there would be no
+        -- overlay.
+        (ec, out, err) <- hyphaWith [("HYPHA_PLAN_OVERLAY", "/no/such/overlay.json")] cache
+          [ "--json", "--offline", "--project-dir", overlayProject
+          , "--plan-overlay", overlayFile, "source", "store-dep/StoreDep.Hello" ]
+        assertEqual ("exit code (stderr: " <> err <> ")") ExitSuccess ec
+        assertBool ("expected a path inside the overlay's directory; got:\n" <> out)
+          (overlayStoreDep `isInfixOf` out)
+        assertEqual "nothing to warn about" [] (overlayLines err)
+
+  , testCase "the default overlay beside the project's plan applies" $
+      withOverlayProjectAt $ \root -> do
+        copyFile overlayFile (root </> "hypha-plan-overlay.json")
+        withSystemTempDirectory "hypha-overlay-cache" $ \cache -> do
+          (ec, out, err) <- hyphaWith [] cache
+            [ "--json", "--offline", "--project-dir", root
+            , "source", "store-dep/StoreDep.Hello" ]
+          assertEqual ("exit code (stderr: " <> err <> ")") ExitSuccess ec
+          assertBool ("expected a path inside the overlay's directory; got:\n" <> out)
+            (overlayStoreDep `isInfixOf` out)
+          assertNothingCached cache
+
+  , testCase "a missing --plan-overlay file warns once, though versions loads the plan twice" $
+      withSystemTempDirectory "hypha-overlay-cache" $ \cache -> do
+        let missing = "/no/such/flag-overlay.json"
+        (ec, _out, err) <- hyphaWith [] cache
+          [ "--json", "--offline", "--project-dir", overlayProject
+          , "--plan-overlay", missing, "versions", "store-dep" ]
+        assertEqual ("exit code (stderr: " <> err <> ")") ExitSuccess ec
+        case overlayLines err of
+          [line] -> do
+            assertBool ("the warning names the file: " <> line) (missing `isInfixOf` line)
+            assertBool ("the warning names the flag: " <> line)
+              ("--plan-overlay" `isInfixOf` line)
+          other -> assertFailure
+            ("expected exactly one overlay warning, got " <> show (length other)
+              <> " in:\n" <> err)
+
+  , testCase "a missing HYPHA_PLAN_OVERLAY file warns once, naming the variable" $
+      withSystemTempDirectory "hypha-overlay-cache" $ \cache -> do
+        let missing = "/no/such/env-overlay.json"
+        (ec, _out, err) <- hyphaWith [("HYPHA_PLAN_OVERLAY", missing)] cache
+          [ "--json", "--offline", "--project-dir", overlayProject
+          , "versions", "store-dep" ]
+        assertEqual ("exit code (stderr: " <> err <> ")") ExitSuccess ec
+        case overlayLines err of
+          [line] -> do
+            assertBool ("the warning names the file: " <> line) (missing `isInfixOf` line)
+            assertBool ("the warning names the variable: " <> line)
+              ("HYPHA_PLAN_OVERLAY" `isInfixOf` line)
+          other -> assertFailure
+            ("expected exactly one overlay warning, got " <> show (length other)
+              <> " in:\n" <> err)
+
+  , testCase "a missing file the variable names is not replaced by the default" $
+      withOverlayProjectAt $ \root -> do
+        copyFile overlayFile (root </> "hypha-plan-overlay.json")
+        withSystemTempDirectory "hypha-overlay-cache" $ \cache -> do
+          (ec, out, _err) <- hyphaWith [("HYPHA_PLAN_OVERLAY", "/no/such/env-overlay.json")] cache
+            [ "--json", "--offline", "--project-dir", root
+            , "source", "store-dep/StoreDep.Hello" ]
+          -- Offline, and without an overlay, nothing can answer.
+          assertBool ("the default overlay must not answer; got:\n" <> out)
+            (ec /= ExitSuccess && not (overlayStoreDep `isInfixOf` out))
+
+  , testCase "a missing default overlay is no output at all" $
+      withSystemTempDirectory "hypha-overlay-cache" $ \cache -> do
+        (_ec, _out, err) <- hyphaWith [] cache
+          [ "--json", "--offline", "--project-dir", overlayProject
+          , "versions", "store-dep" ]
+        assertEqual "nothing mentions an overlay" [] (overlayLines err)
+
+  , testCase "a malformed overlay fails the plan load with an error naming the file" $
+      withSystemTempDirectory "hypha-overlay-bad" $ \dir ->
+        withSystemTempDirectory "hypha-overlay-cache" $ \cache -> do
+          let bad = dir </> "bad-overlay.json"
+          writeFile bad "{ \"install-plan\": 3 }"
+          (ec, out, err) <- hyphaWith [] cache
+            [ "--json", "--offline", "--project-dir", overlayProject
+            , "--plan-overlay", bad, "deps", "store-dep" ]
+          assertBool ("a failing exit code; got:\n" <> out <> err) (ec /= ExitSuccess)
+          assertBool ("the error names the file; got:\n" <> out) (bad `isInfixOf` out)
+          assertBool ("the error says what is wrong; got:\n" <> out)
+            ("malformed" `isInfixOf` out)
+  ]
+  where
+    overlayProject = "test/fixtures/overlay-project"
+    overlayFile    = overlayProject </> "plan-overlay.json"
+    overlayStoreDep = overlayProject </> "store-dep"
+
+-- | Run @hypha@ with a fresh cache directory and extra environment
+-- variables.  @HYPHA_PLAN_OVERLAY@ is removed from what the test process
+-- inherited, so the caller's own environment cannot change the result.
+hyphaWith :: [(String, String)] -> FilePath -> [String] -> IO (ExitCode, String, String)
+hyphaWith extraEnv cache args = do
+  inherited <- getEnvironment
+  let env' = extraEnv <> filter ((/= "HYPHA_PLAN_OVERLAY") . fst) inherited
+  readCreateProcessWithExitCode
+    (proc "hypha" (["--cache-dir", cache] <> args)) { env = Just env' } ""
+
+-- | A throwaway project root holding the overlay fixture's plan, for the
+-- tests that put an overlay at the default path.
+withOverlayProjectAt :: (FilePath -> IO a) -> IO a
+withOverlayProjectAt k = withSystemTempDirectory "hypha-overlay-project" $ \root -> do
+  let fixture = "test/fixtures/overlay-project"
+  copyFile (fixture </> "cabal.project") (root </> "cabal.project")
+  createDirectoryIfMissing True (root </> "dist-newstyle" </> "cache")
+  copyFile (fixture </> planPath) (root </> planPath)
+  k root
+
+-- | The lines of a stderr text that say anything about an overlay.
+overlayLines :: String -> [String]
+overlayLines = filter (("overlay" `isInfixOf`) . map toLower) . lines
+
+-- | A source answered from a directory the plan names creates nothing
+-- under the cache root's source directory.
+assertNothingCached :: FilePath -> IO ()
+assertNothingCached cache = do
+  let sourceDir = cache </> "source"
+  exists <- doesDirectoryExist sourceDir
+  entries <- if exists then listDirectory sourceDir else pure []
+  assertEqual "nothing was unpacked under the cache's source directory" [] entries
 
 -- | The same package in a plan with the dependency edge removed, so the
 -- re-export is unfollowable for a reason the plan explains.

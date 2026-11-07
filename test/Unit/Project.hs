@@ -2,14 +2,17 @@
 module Unit.Project (tests) where
 
 import Test.Tasty (TestTree, testGroup)
-import Test.Tasty.HUnit (testCase, (@?=), assertBool)
+import Test.Tasty.HUnit (testCase, (@?=), assertBool, assertFailure)
 import Data.Time.Clock (addUTCTime, getCurrentTime)
 import System.Directory
-  ( createDirectory, createDirectoryIfMissing, setModificationTime )
+  ( copyFile, createDirectory, createDirectoryIfMissing, makeAbsolute
+  , setModificationTime )
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
 
 import qualified Data.Map.Strict as Map
+import Data.List (isInfixOf)
+import qualified Data.Text as Text
 
 import Data.Aeson qualified as Aeson
 import Hypha.BuildEnv.Mock (emptyMock, mkMockBuildEnv)
@@ -21,7 +24,14 @@ import Hypha.Project.Discovery (DiscoveryError (..), cabalStoreBase)
 import Hypha.Types.BuildPlan
 import Hypha.Types.PackageId (PackageId (..), PackageName (..), Version (..))
 import Hypha.Project.Discovery (discoverProjectRoot)
-import Hypha.Project.Plan (PlanPin (..), loadBuildPlan, loadPlanVersions)
+import Hypha.Error (HyphaError (..), errorActions, errorMessage)
+import Hypha.Project.Plan
+  ( AppliedOverlay (..), ExplicitOverlay (..), MergedPlan (..)
+  , OverlaySetting (..), OverlaySource (..), PlanError (..), PlanPin (..)
+  , defaultOverlayPath, loadBuildPlan, loadMergedPlan, loadPlanVersions
+  , resolveOverlaySetting )
+import Hypha.Project.PlanOverlay
+  (EntryOutcome (..), OverlayError (..), OverlayReport (..))
 import Hypha.Project.Overrides (parsePackageOverride)
 
 tests :: TestTree
@@ -37,6 +47,14 @@ tests = testGroup "Unit.Project"
   , testApplyOverrides
   , testOverrideDropsSourceDirectory
   , testSourceLookupMatchesPlanVersion
+  , testGroup "plan overlay"
+      [ testOverlayPrecedence
+      , testOverlayDefaultPath
+      , testOverlayMissingDoesNotFallBack
+      , testOverlaySourcesDependency
+      , testOverlayMalformedFailsLoad
+      , testPlanVersionsIgnoreOverlay
+      ]
   ]
 
 testDiscovery :: TestTree
@@ -98,7 +116,7 @@ testLoadBuildPlan :: TestTree
 testLoadBuildPlan = testCase "loadBuildPlan parses fixture plan.json" $
   withSystemTempDirectory "hypha-plan" $ \cacheDir -> do
     let fixtureDir = "test" </> "fixtures" </> "tiny-project"
-    result <- loadBuildPlan cacheDir (ProjectRoot fixtureDir)
+    result <- loadBuildPlan cacheDir OverlayUnset (ProjectRoot fixtureDir)
     case result of
       Left err -> error ("Expected to parse plan, got: " ++ show err)
       Right bp -> do
@@ -127,7 +145,7 @@ testPreExistingSourceDirectory =
     withSystemTempDirectory "hypha-plan" $ \cacheDir -> do
       let fixtureDir = "test" </> "fixtures" </> "pre-existing-src"
           srcDir     = fixtureDir </> "patched-dep"
-      result <- loadBuildPlan cacheDir (ProjectRoot fixtureDir)
+      result <- loadBuildPlan cacheDir OverlayUnset (ProjectRoot fixtureDir)
       case result of
         Left err -> error ("Expected to parse plan, got: " ++ show err)
         Right bp -> do
@@ -196,7 +214,7 @@ testSourceRepoUnitsResolveToCheckout =
         , "  ] }"
         ]
       withSystemTempDirectory "hypha-plan" $ \cacheDir -> do
-        result <- loadBuildPlan cacheDir (ProjectRoot root)
+        result <- loadBuildPlan cacheDir OverlayUnset (ProjectRoot root)
         case result of
           Left err -> error ("Expected to parse plan, got: " ++ show err)
           Right bp -> do
@@ -246,7 +264,7 @@ testLoadPlanVersionsAgrees =
   testCase "loadPlanVersions agrees with the full plan's pins" $
     withSystemTempDirectory "hypha-plan" $ \cacheDir -> do
       let fixtureDir = "test" </> "fixtures" </> "tiny-project"
-      full  <- loadBuildPlan     cacheDir (ProjectRoot fixtureDir)
+      full  <- loadBuildPlan     cacheDir OverlayUnset (ProjectRoot fixtureDir)
       light <-                   loadPlanVersions (ProjectRoot fixtureDir)
       case (full, light) of
         (Right bp, Right pins) -> do
@@ -270,7 +288,7 @@ testApplyOverrides :: TestTree
 testApplyOverrides = testCase "applyOverrides changes pinned version in plan" $
   withSystemTempDirectory "hypha-plan" $ \cacheDir -> do
     let fixtureDir = "test" </> "fixtures" </> "tiny-project"
-    result <- loadBuildPlan cacheDir (ProjectRoot fixtureDir)
+    result <- loadBuildPlan cacheDir OverlayUnset (ProjectRoot fixtureDir)
     case result of
       Left err -> error ("Expected to parse plan, got: " ++ show err)
       Right bp -> do
@@ -296,7 +314,7 @@ testOverrideDropsSourceDirectory =
           srcDir     = fixtureDir </> "patched-dep"
           patched    = PackageName "patched-dep"
           app        = PackageName "app"
-      result <- loadBuildPlan cacheDir (ProjectRoot fixtureDir)
+      result <- loadBuildPlan cacheDir OverlayUnset (ProjectRoot fixtureDir)
       case result of
         Left err -> error ("Expected to parse plan, got: " ++ show err)
         Right bp -> do
@@ -328,7 +346,7 @@ testSourceLookupMatchesPlanVersion =
           patched    = PackageName "patched-dep"
           planned    = PackageId patched (Version "1.0")
           other      = PackageId patched (Version "2.0")
-      result <- loadBuildPlan cacheDir (ProjectRoot fixtureDir)
+      result <- loadBuildPlan cacheDir OverlayUnset (ProjectRoot fixtureDir)
       case result of
         Left err -> error ("Expected to parse plan, got: " ++ show err)
         Right bp -> do
@@ -342,3 +360,176 @@ testSourceLookupMatchesPlanVersion =
           let overridden = applyOverrides [PackageOverride patched (Version "2.0")] bp
           resolver' <- mkPackageResolver (mkMockBuildEnv emptyMock) client cacheDir overridden
           resolveSrcLocal resolver' other >>= (@?= Nothing)
+
+-- ---------------------------------------------------------------------------
+-- Plan overlay
+
+-- | The committed fixture: a plan whose one dependency has no @pkg-src@,
+-- and an overlay that gives it one.
+overlayFixture, overlayFile :: FilePath
+overlayFixture = "test" </> "fixtures" </> "overlay-project"
+overlayFile    = overlayFixture </> "plan-overlay.json"
+
+-- | A throwaway project holding the fixture's plan, so a test can put an
+-- overlay at the default path (or break one there) without touching the
+-- committed fixture.
+withOverlayProject :: (FilePath -> IO a) -> IO a
+withOverlayProject k = withSystemTempDirectory "hypha-overlay-project" $ \root -> do
+  writeFile (root </> "cabal.project") "packages: .\n"
+  createDirectoryIfMissing True (root </> "dist-newstyle" </> "cache")
+  let planFile = "dist-newstyle" </> "cache" </> "plan.json"
+  copyFile (overlayFixture </> planFile) (root </> planFile)
+  k root
+
+-- | How many units the merge applied an entry to.
+appliedCount :: AppliedOverlay -> Int
+appliedCount ao = length
+  [ () | EntryApplied <- Map.elems (orEntries (aoReport ao)) ]
+
+-- | The flag wins over the variable, and either names a file whether or
+-- not it exists: a named file that is missing is not replaced by the
+-- other name, and the variable only counts when the flag is absent.
+testOverlayPrecedence :: TestTree
+testOverlayPrecedence = testCase "the flag wins over the variable, which wins over nothing" $ do
+  let present = overlayFile
+      absent  = overlayFixture </> "no-such-overlay.json"
+      absent2 = overlayFixture </> "also-no-such-overlay.json"
+  resolveOverlaySetting (Just present) (Just absent)
+    >>= (@?= OverlayFile ByFlag present)
+  resolveOverlaySetting Nothing (Just present)
+    >>= (@?= OverlayFile ByEnvironment present)
+  resolveOverlaySetting Nothing Nothing
+    >>= (@?= OverlayUnset)
+  -- A flag naming a missing file is not displaced by a variable naming a
+  -- present one.
+  resolveOverlaySetting (Just absent) (Just present)
+    >>= (@?= OverlayMissing ByFlag absent)
+  resolveOverlaySetting (Just absent) (Just absent2)
+    >>= (@?= OverlayMissing ByFlag absent)
+  resolveOverlaySetting Nothing (Just absent2)
+    >>= (@?= OverlayMissing ByEnvironment absent2)
+  -- A variable that is set but empty names nothing.
+  resolveOverlaySetting Nothing (Just "")
+    >>= (@?= OverlayUnset)
+
+-- | Only when nothing names a file is the default tried, and it is
+-- resolved against the project root the load is given, not the working
+-- directory.
+testOverlayDefaultPath :: TestTree
+testOverlayDefaultPath = testCase "the default overlay is <project root>/hypha-plan-overlay.json" $ do
+  defaultOverlayPath (ProjectRoot "/some/root")
+    @?= "/some/root" </> "hypha-plan-overlay.json"
+  withOverlayProject $ \root -> do
+    -- No file there: no overlay.
+    absentCase <- loadMergedPlan OverlayUnset (ProjectRoot root)
+    case absentCase of
+      Right mp -> assertBool "no file means no overlay" (null (mpOverlay mp))
+      Left err -> assertFailure ("expected the plan to load, got: " <> show err)
+    -- A file there: it is the overlay, and says it is the default.
+    copyFile overlayFile (defaultOverlayPath (ProjectRoot root))
+    present <- loadMergedPlan OverlayUnset (ProjectRoot root)
+    case present of
+      Right MergedPlan { mpOverlay = Just ao } -> do
+        aoSource ao @?= OverlayDefault
+        aoPath ao   @?= defaultOverlayPath (ProjectRoot root)
+        appliedCount ao @?= 1
+      other -> assertFailure ("expected the default overlay to apply, got: "
+                                <> either show (const "a plan without one") other)
+    -- A file the flag names takes its place, even with a default there.
+    flagged <- loadMergedPlan (OverlayFile ByFlag overlayFile) (ProjectRoot root)
+    case flagged of
+      Right MergedPlan { mpOverlay = Just ao } -> do
+        aoSource ao @?= OverlayExplicit ByFlag
+        aoPath ao   @?= overlayFile
+      other -> assertFailure ("expected the flag's overlay to apply, got: "
+                                <> either show (const "a plan without one") other)
+
+-- | A file named explicitly but missing applies no overlay, and the
+-- default file beside the plan is not substituted for it.
+testOverlayMissingDoesNotFallBack :: TestTree
+testOverlayMissingDoesNotFallBack =
+  testCase "a named overlay that is missing applies no overlay, not the default" $
+    withOverlayProject $ \root -> do
+      copyFile overlayFile (defaultOverlayPath (ProjectRoot root))
+      r <- loadMergedPlan (OverlayMissing ByEnvironment "gone.json") (ProjectRoot root)
+      case r of
+        Right mp -> assertBool "no overlay should be in use" (null (mpOverlay mp))
+        Left err -> assertFailure ("expected the plan to load, got: " <> show err)
+
+-- | The point of the overlay: a pre-existing unit with no source gets one,
+-- and stays a dependency whose source is read like any other.
+testOverlaySourcesDependency :: TestTree
+testOverlaySourcesDependency =
+  testCase "an overlay gives a pre-existing unit its source directory" $
+    withSystemTempDirectory "hypha-plan" $ \cacheDir -> do
+      let root     = ProjectRoot overlayFixture
+          storeDep = PackageName "store-dep"
+          srcDir   = overlayFixture </> "store-dep"
+      without <- loadBuildPlan cacheDir OverlayUnset root
+      case without of
+        Left err -> assertFailure ("plan without overlay: " <> show err)
+        Right bp -> fmap puSrcDir (lookupUnit storeDep bp) @?= Just Nothing
+      with <- loadBuildPlan cacheDir (OverlayFile ByFlag overlayFile) root
+      case with of
+        Left err -> assertFailure ("plan with overlay: " <> show err)
+        Right bp -> case lookupUnit storeDep bp of
+          Nothing -> assertFailure "expected a unit for store-dep"
+          Just pu -> do
+            puSrcDir pu  @?= Just srcDir
+            puIsLocal pu @?= False
+            puOrigin pu  @?= OriginDistribution (Just srcDir)
+            assertBool "its .cabal file is parsed for components"
+              (not (null (puLibComponents pu)))
+      -- The merge's report and the plan's own path travel with the plan.
+      merged <- loadMergedPlan (OverlayFile ByFlag overlayFile) root
+      case merged of
+        Right mp -> do
+          expected <- makeAbsolute
+            (overlayFixture </> "dist-newstyle" </> "cache" </> "plan.json")
+          mpPlanPath mp @?= expected
+          fmap appliedCount (mpOverlay mp) @?= Just 1
+        Left err -> assertFailure ("merged plan: " <> show err)
+
+-- | A broken overlay fails the load as a broken @plan.json@ does, with the
+-- typed cause intact until the message is rendered, and the message names
+-- the file and the cause.
+testOverlayMalformedFailsLoad :: TestTree
+testOverlayMalformedFailsLoad =
+  testCase "a malformed overlay fails the load with an error naming the file" $
+    withOverlayProject $ \root -> do
+      let file = defaultOverlayPath (ProjectRoot root)
+      writeFile file "{ \"install-plan\": 3 }"
+      r <- loadMergedPlan OverlayUnset (ProjectRoot root)
+      case r of
+        Right _ -> assertFailure "a malformed overlay must fail the load"
+        Left err@(PlanOverlayFailure source (OverlayMalformed f cause)) -> do
+          source @?= OverlayDefault
+          f      @?= file
+          let message = Text.unpack (errorMessage (PlanFailure (ProjectRoot root) err))
+          assertBool ("the message names the file: " <> message) (file `isInfixOf` message)
+          assertBool ("the message carries the cause: " <> message) (cause `isInfixOf` message)
+          assertBool ("the message says where it came from: " <> message)
+            ("default path" `isInfixOf` message)
+          Map.lookup "plan_overlay" (errorActions (PlanFailure (ProjectRoot root) err))
+            @?= Just (Text.pack file)
+        Left other -> assertFailure ("expected an overlay failure, got: " <> show other)
+      -- The same file is a failure through 'loadBuildPlan', the way a
+      -- broken plan.json is.
+      withSystemTempDirectory "hypha-plan" $ \cacheDir -> do
+        built <- loadBuildPlan cacheDir OverlayUnset (ProjectRoot root)
+        case built of
+          Left PlanOverlayFailure{} -> pure ()
+          other -> assertFailure ("expected the build plan to fail, got: "
+                                    <> either show (const "a plan") other)
+
+-- | The @lookup@ fast path reads versions and unit-ids, which an overlay
+-- never changes, so a broken overlay must not be able to fail it.
+testPlanVersionsIgnoreOverlay :: TestTree
+testPlanVersionsIgnoreOverlay =
+  testCase "loadPlanVersions does not read the overlay" $
+    withOverlayProject $ \root -> do
+      writeFile (defaultOverlayPath (ProjectRoot root)) "this is not JSON"
+      r <- loadPlanVersions (ProjectRoot root)
+      case r of
+        Right pins -> Map.member (PackageName "store-dep") pins @?= True
+        Left err   -> assertFailure ("expected the versions to load, got: " <> show err)

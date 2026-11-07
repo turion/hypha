@@ -57,7 +57,29 @@ tests = testGroup "Unit.CliParser"
                         (parseFails ["lookup", "fmap", "--hoogle-timeout", v]))
                 ["0", "-5", "abc", "3.5", ""]
       ]
+
+  , testGroup "--plan-overlay"
+      [ testCase "names the overlay file" $
+          planOverlayOf ["--plan-overlay", "some/overlay.json", "doctor"]
+            @?= Just "some/overlay.json"
+
+      , testCase "absent means absent: the environment and the default decide" $
+          planOverlayOf ["doctor"] @?= Nothing
+
+      , testCase "is a global option, documented in --help" $
+          case execParserPure defaultPrefs cliParserInfo ["--help"] of
+            Failure f -> assertBool "--help should describe --plan-overlay"
+              ("--plan-overlay FILE" `isInfixOf` fst (renderFailure f "hypha"))
+            _ -> assertFailure "--help should short-circuit the parse"
+      ]
   ]
+
+-- | The @--plan-overlay@ of a successful parse.
+planOverlayOf :: [String] -> Maybe FilePath
+planOverlayOf argv =
+  case execParserPure defaultPrefs cliParserInfo argv of
+    Success (opts, _) -> hoPlanOverlay opts
+    _                 -> error ("expected a successful parse of " <> show argv)
 
 -- | The @--hoogle-timeout@ of a successful parse.
 hoogleTimeoutOf :: [String] -> Maybe TimeoutSeconds

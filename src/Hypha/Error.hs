@@ -16,7 +16,9 @@ module Hypha.Error
   , errorActions
   ) where
 
+import Cabal.Plan (UnitId (..))
 import Data.Char (isAlphaNum)
+import Data.Foldable (toList)
 import Data.Map.Strict (Map)
 import qualified Data.Map.Strict as Map
 import Data.Text (Text)
@@ -33,7 +35,8 @@ import Hypha.Hoogle.Tier (Tier, renderTierList)
 import Hypha.Hoogle.Type (HoogleQuery (..))
 import Hypha.Project.Discovery (DiscoveryError (..))
 import Hypha.Project.Overrides (OverrideError, renderOverrideError)
-import Hypha.Project.Plan (PlanError (..))
+import Hypha.Project.Plan (PlanError (..), renderOverlaySource)
+import Hypha.Project.PlanOverlay (OverlayError (..))
 import Hypha.Server.Bind (BindError, renderBindError)
 import Hypha.Source.Reach
   ( ReachGap, SymbolSearchFailure (..), renderReachGap
@@ -196,6 +199,10 @@ errorCode = \case
   PlanFailure _ e    -> case e of
     PlanNotFound{}     -> "ENV_ERROR"
     PlanParseFailure{} -> "CORRUPTION"
+    PlanOverlayFailure _ oe -> case oe of
+      OverlayUnreadable{} -> "ENV_ERROR"
+      OverlayMalformed{}  -> "CORRUPTION"
+      OverlayDuplicateIds{} -> "CORRUPTION"
   HackageFailure _ e -> hackageErrorWireCode e
   HoogleOffline{}     -> "HOOGLE_OFFLINE"
   HoogleNotFound{}    -> "NOT_FOUND"
@@ -235,6 +242,10 @@ errorMessage = \case
       <> " (cabal-plan: " <> Text.pack pth <> ")"
       <> "; run `cabal build --dry-run`"
     PlanParseFailure m -> "plan.json parse failure: " <> Text.pack m
+    PlanOverlayFailure source oe ->
+      "plan overlay " <> Text.pack (overlayErrorPath oe)
+        <> " (from " <> renderOverlaySource source <> "): "
+        <> renderOverlayError oe
   HoogleOffline      _ _ ->
     "--offline: no cached answer for this query and the network is disabled"
   HoogleNotFound     _ _ ->
@@ -249,6 +260,10 @@ errorExitCode = \case
   PlanFailure _ e    -> case e of
     PlanNotFound{}     -> exitEnvironmentError
     PlanParseFailure{} -> exitCacheError
+    PlanOverlayFailure _ oe -> case oe of
+      OverlayUnreadable{}   -> exitEnvironmentError
+      OverlayMalformed{}    -> exitCacheError
+      OverlayDuplicateIds{} -> exitCacheError
   HackageFailure _ e  -> hackageErrorExitCode e
   HoogleOffline{}     -> exitNetworkError
   HoogleNotFound{}    -> exitNotFound
@@ -293,7 +308,29 @@ errorActions = \case
     , ("tiers_consulted", renderTierList tiers)
     ]
   HackageFailure _ (Hackage.TarballFailure tErr) -> tarballRecoveryActions tErr
+  -- Which file, and who named it: an agent has to know whether the fix is
+  -- the file, the flag or the variable.
+  PlanFailure _ (PlanOverlayFailure source oe) -> Map.fromList
+    [ ("plan_overlay",        Text.pack (overlayErrorPath oe))
+    , ("plan_overlay_source", renderOverlaySource source)
+    ]
   _ -> Map.empty
+
+-- | The overlay file an 'OverlayError' is about.
+overlayErrorPath :: OverlayError -> FilePath
+overlayErrorPath = \case
+  OverlayUnreadable   f _ -> f
+  OverlayMalformed    f _ -> f
+  OverlayDuplicateIds f _ -> f
+
+-- | Why an overlay could not be used; the file is named by the caller.
+renderOverlayError :: OverlayError -> Text
+renderOverlayError = \case
+  OverlayUnreadable   _ e   -> "cannot read the file: " <> Text.pack (show e)
+  OverlayMalformed    _ msg -> "malformed: " <> Text.pack msg
+  OverlayDuplicateIds _ ids ->
+    "more than one entry for the same unit id: "
+      <> Text.intercalate ", " [ uid | UnitId uid <- toList ids ]
 
 -- | A @hypha lookup@ command line an agent (or a shell) can run
 -- verbatim.  Type-signature queries contain spaces, @>@ and @|@, so an

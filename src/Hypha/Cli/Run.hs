@@ -59,7 +59,8 @@ import Hypha.Project.Components qualified as Comp
 import Hypha.Project.Discovery (cabalStoreBase, discoverProjectRoot)
 import Hypha.Project.Fingerprint qualified as Fingerprint
 import Hypha.Project.Overrides (parsePackageOverride)
-import Hypha.Project.Plan (loadBuildPlan, loadPlanVersions, planHash)
+import Hypha.Project.Plan
+  (OverlaySetting, loadBuildPlan, loadPlanVersions, planHash)
 import Hypha.Project.Plan qualified as Plan
 import Hypha.Search.PackageCache qualified as PC
 import Hypha.Source.Dependencies (dependencyReach)
@@ -112,8 +113,9 @@ loadPlan :: Hypha (ProjectRoot, BuildPlan)
 loadPlan = do
   opts      <- askOpts
   cacheRoot <- asks heCacheDir
+  overlay   <- asks heOverlay
   root      <- mapEitherIO DiscoveryFailure (discoverProjectRoot (hoProjectDir opts))
-  rawPlan   <- mapEitherIO (PlanFailure root) (loadBuildPlan cacheRoot root)
+  rawPlan   <- mapEitherIO (PlanFailure root) (loadBuildPlan cacheRoot overlay root)
   overrides <- collectOverrides (hoPackageOverrides opts)
   pure (root, applyOverrides overrides rawPlan)
 
@@ -145,16 +147,18 @@ loadProjectAndPlan :: Hypha (Maybe ProjectRoot, BuildPlan)
 loadProjectAndPlan = do
   opts      <- askOpts
   cacheRoot <- asks heCacheDir
+  overlay   <- asks heOverlay
   mRoot <- liftIO $ warnOnLeft
              (errorMessage . DiscoveryFailure)
              Nothing
              (fmap Just <$> discoverProjectRoot (hoProjectDir opts))
-  plan <- liftIO $ maybe (pure emptyBuildPlan) (loadPlanOrWarn cacheRoot) mRoot
+  plan <- liftIO $
+    maybe (pure emptyBuildPlan) (loadPlanOrWarn cacheRoot overlay) mRoot
   pure (mRoot, plan)
   where
-    loadPlanOrWarn cacheRoot root =
+    loadPlanOrWarn cacheRoot overlay root =
       warnOnLeft (errorMessage . PlanFailure root) emptyBuildPlan
-                 (loadBuildPlan cacheRoot root)
+                 (loadBuildPlan cacheRoot overlay root)
 
 -- | Pick the right build-env constructor for the loaded project.
 -- Project-less calls degrade to a store-only env (still announces the
@@ -467,6 +471,7 @@ runLookupCommand q = do
   -- @INTERNAL_ERROR@ envelope.
   opts <- askOpts
   cacheRoot <- asks heCacheDir
+  overlay   <- asks heOverlay
   mRoot <- liftIO $ warnOnLeft
              (errorMessage . DiscoveryFailure)
              Nothing
@@ -498,7 +503,7 @@ runLookupCommand q = do
       prepLocal = case mRoot of
         Nothing   -> pure ()
         Just root -> withQuietIfNotVerbose (hoVerbose opts) $
-          ensureProjectHoogle cacheRoot storeRoot distRoot dotHypha hoogleLocal root
+          ensureProjectHoogle cacheRoot overlay storeRoot distRoot dotHypha hoogleLocal root
 
   scope <- cacheScopeFor mRoot
 
@@ -557,13 +562,14 @@ cacheScopeFor (Just root) = do
 -- announced on @stderr@ (see the body).
 ensureProjectHoogle
   :: FilePath          -- ^ cache root
+  -> OverlaySetting    -- ^ plan overlay
   -> FilePath          -- ^ store root
   -> FilePath          -- ^ dist doc root
   -> FilePath          -- ^ project @.hypha@ directory
   -> HogLocal.HyphaHoogle
   -> ProjectRoot
   -> IO ()
-ensureProjectHoogle cacheRoot storeRoot distRoot dotHypha _ root = do
+ensureProjectHoogle cacheRoot overlay storeRoot distRoot dotHypha _ root = do
   -- Best-effort: ANY failure here (missing toolchain in a sandbox,
   -- IO errors regenerating the DB, Hoogle library panics) must not
   -- abort the lookup. The cascade in 'Lookup.runLookup' is designed
@@ -571,7 +577,7 @@ ensureProjectHoogle cacheRoot storeRoot distRoot dotHypha _ root = do
   -- we keep going on failure — but every failure is announced on
   -- stderr so the user is never left wondering why Tier 2 went silent.
   r <- try @IO @SomeException $ do
-    ePlan <- loadBuildPlan cacheRoot root
+    ePlan <- loadBuildPlan cacheRoot overlay root
     case ePlan of
       Left planErr ->
         hPutStrLn stderr $

@@ -15,7 +15,7 @@ import Hypha.Hackage.Api (mkOfflineHackageClient)
 import Hypha.Output.Json (encodeSuccessEnvelope)
 import Hypha.Package.Resolver (PackageResolver (..), ResolvedPackage (..), mkPackageResolver)
 import Hypha.Project.Discovery (discoverProjectRoot)
-import Hypha.Project.Plan (loadBuildPlan)
+import Hypha.Project.Plan (OverlaySetting (..), loadBuildPlan)
 import qualified Hypha.Project.Components as SourceModules
 import Hypha.Types.PackageId (PackageName (..), PackageId (..), Version (..))
 import qualified Data.Set as Set
@@ -44,7 +44,7 @@ runPackageCommand =
     case rootResult of
       Left err -> error $ "Could not discover project root: " ++ show err
       Right root -> do
-        planResult <- loadBuildPlan cacheDir root
+        planResult <- loadBuildPlan cacheDir OverlayUnset root
         case planResult of
           Left err -> error $ "Could not load plan: " ++ show err
           Right plan -> do
@@ -60,7 +60,7 @@ runPackageLocalCommand =
     case rootResult of
       Left err -> error $ "Could not discover project root: " ++ show err
       Right root -> do
-        planResult <- loadBuildPlan cacheDir root
+        planResult <- loadBuildPlan cacheDir OverlayUnset root
         case planResult of
           Left err -> error $ "Could not load plan: " ++ show err
           Right plan -> do

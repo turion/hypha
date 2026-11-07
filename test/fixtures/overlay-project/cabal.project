@@ -1,0 +1,6 @@
+-- A project whose one dependency, store-dep, the plan lists as a
+-- pre-existing unit with no source, as cabal does for a package out of a
+-- distribution's package set.  plan-overlay.json beside this file says
+-- where that source is; it is not at the default path, so each test
+-- chooses whether it applies.
+packages: .

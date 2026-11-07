@@ -48,6 +48,7 @@ plainOptions = HyphaOptions
   , hoVerbose          = False
   , hoCacheDir         = Nothing
   , hoHoogleTimeout    = Nothing
+  , hoPlanOverlay      = Nothing
   }
 
 tests :: TestTree

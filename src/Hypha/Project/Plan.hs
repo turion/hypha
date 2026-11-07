@@ -6,7 +6,18 @@ module Hypha.Project.Plan
   ( -- * Types
     PlanError (..)
   , PlanPin (..)
+    -- * Plan overlay
+  , ExplicitOverlay (..)
+  , OverlaySource (..)
+  , OverlaySetting (..)
+  , resolveOverlaySetting
+  , warnOverlayMissing
+  , defaultOverlayPath
+  , renderOverlaySource
     -- * Loading
+  , MergedPlan (..)
+  , AppliedOverlay (..)
+  , loadMergedPlan
   , loadBuildPlan
   , loadPlanVersions
     -- * Staleness
@@ -15,7 +26,9 @@ module Hypha.Project.Plan
 
 import Control.Applicative ((<|>))
 import Control.Exception.Safe (IOException, try)
-import Control.Monad (filterM)
+import Control.Monad (filterM, mfilter)
+import Control.Monad.IO.Class (liftIO)
+import Control.Monad.Trans.Except (ExceptT (..), runExceptT, withExceptT)
 import Control.Monad.Trans.Maybe (MaybeT (..), runMaybeT)
 import qualified Crypto.Hash.SHA256 as SHA256
 import qualified Data.ByteString.Base16 as Base16
@@ -40,6 +53,8 @@ import qualified Hypha.Hackage.Source as Src
 import Hypha.Project.BuildContext (BuildContext (..))
 import qualified Hypha.Project.Components as Comp
 import qualified Hypha.Project.GhcIncludes as Inc
+import Hypha.Project.PlanOverlay
+  ( OverlayError, OverlayReport, applyPlanOverlay, readPlanOverlay )
 import qualified Hypha.Source.CppMacros as Cpp
 import Hypha.Types.BuildPlan
   ( BuildPlan (..), CompilerId (..), PackageOrigin (..), PlannedUnit (..)
@@ -71,43 +86,169 @@ data PlanError
     -- ^ @plan.json@ does not exist at the expected path.
   | PlanParseFailure !String
     -- ^ The @plan.json@ file could not be decoded.
+  | PlanOverlayFailure !OverlaySource !OverlayError
+    -- ^ The plan overlay in use could not be read or understood.  Carries
+    -- where the overlay was named, and the typed cause, for the rendering
+    -- layer.
   deriving stock (Show, Eq)
 
--- | Load the build plan from @dist-newstyle\/cache\/plan.json@
---   relative to the project root.
+-- | Who named an overlay file explicitly.
+data ExplicitOverlay
+  = ByFlag
+    -- ^ @--plan-overlay FILE@.
+  | ByEnvironment
+    -- ^ The @HYPHA_PLAN_OVERLAY@ environment variable.
+  deriving stock (Show, Eq)
+
+-- | Where the plan overlay in use came from.
+data OverlaySource
+  = OverlayExplicit !ExplicitOverlay
+  | OverlayDefault
+    -- ^ The default file, 'defaultOverlayPath', under the project root.
+  deriving stock (Show, Eq)
+
+-- | What the command line and the environment say about the overlay,
+-- settled once per process (by 'resolveOverlaySetting', in @runHypha@).
 --
---   Uses @cabal-plan@'s @findPlanJson@ for robust discovery.  For every
---   unit whose source directory is known (inplace via @pkg-src.path@, a
---   @source-repository-package@ checkout under @dist-newstyle/src@, or
---   resolved through the source cache) we read its @.cabal@ file and
---   stash the list of library components on the 'PlannedUnit'.  This
---   drives sub-library indexing in @hypha server@.
-loadBuildPlan :: FilePath -> ProjectRoot -> IO (Either PlanError BuildPlan)
-loadBuildPlan cacheRoot (ProjectRoot root) = do
-  result <- try @IO @IOException $ do
-    planPath <- CP.findPlanJson (CP.ProjectRelativeToDir root)
-    (planPath,) <$> CP.decodePlanJson planPath
-  case result of
-    Left e   -> pure (Left (PlanNotFound (show e)))
-    Right (planPath, pj) -> do
-      cache <- Src.enumerateSourceCache (sourceCacheRoot cacheRoot)
-      -- @<builddir>/cache/plan.json@, so the checkouts are two levels up.
-      checkouts <- sourceRepoCheckouts
-                     (takeDirectory (takeDirectory planPath) </> "src")
-      -- How every module in this plan is to be read: the macros it is
-      -- preprocessed against, the compiler headers it may include, and
-      -- the platform its stanzas resolve for.  Derived here because this
-      -- is the one place that holds the compiler, the target platform and
-      -- every package version at once, and derived once rather than per
-      -- module.
-      ctx   <- buildContextFor cacheRoot pj
-      units <- unitsFromPlan pj cache checkouts ctx
-      pure (Right (BuildPlan
-        { bpCompiler     = compilerFromPlan pj
-        , bpUnits        = units
-        , bpOverrides    = []
-        , bpBuildContext = ctx
-        }))
+-- Only 'OverlayUnset' leaves the default file to be tried, and that is
+-- resolved at each load, against the project root it discovers.  A file
+-- named explicitly and missing does not fall back to the default: the
+-- user asked for another file, and a silently applied default would hide
+-- that.
+data OverlaySetting
+  = OverlayFile !ExplicitOverlay !FilePath
+    -- ^ A file named by the flag or the variable, and it exists.
+  | OverlayMissing !ExplicitOverlay !FilePath
+    -- ^ A file named by the flag or the variable that does not exist.
+    -- Already warned about ('warnOverlayMissing'); no overlay applies.
+  | OverlayUnset
+    -- ^ Neither names a file.
+  deriving stock (Show, Eq)
+
+-- | Settle the overlay from the @--plan-overlay@ value and the
+-- @HYPHA_PLAN_OVERLAY@ value, the flag first.  An empty variable names no
+-- file, as an unset one does; an empty flag value is a file name that
+-- does not exist.
+resolveOverlaySetting :: Maybe FilePath -> Maybe FilePath -> IO OverlaySetting
+resolveOverlaySetting flag envVar = case named of
+  Nothing         -> pure OverlayUnset
+  Just (how, f)   -> do
+    exists <- doesFileExist f
+    pure (if exists then OverlayFile how f else OverlayMissing how f)
+  where
+    named = ((,) ByFlag <$> flag)
+        <|> ((,) ByEnvironment <$> mfilter (not . null) envVar)
+
+-- | Say on @stderr@ that an overlay named explicitly is missing, and
+-- that the plan loads without one.  Says nothing for any other setting.
+warnOverlayMissing :: OverlaySetting -> IO ()
+warnOverlayMissing = \case
+  OverlayMissing how f -> hPutStrLn stderr $
+    "warning: plan overlay " <> f <> " (from "
+    <> Text.unpack (renderOverlaySource (OverlayExplicit how))
+    <> ") does not exist; continuing without a plan overlay"
+  OverlayFile{} -> pure ()
+  OverlayUnset  -> pure ()
+
+-- | The overlay file looked for when nothing names one.
+defaultOverlayPath :: ProjectRoot -> FilePath
+defaultOverlayPath (ProjectRoot root) = root </> "hypha-plan-overlay.json"
+
+-- | How a person names the origin of an overlay.
+renderOverlaySource :: OverlaySource -> Text
+renderOverlaySource = \case
+  OverlayExplicit ByFlag        -> "--plan-overlay"
+  OverlayExplicit ByEnvironment -> "HYPHA_PLAN_OVERLAY"
+  OverlayDefault                -> "default path"
+
+-- | A decoded @plan.json@ with the plan overlay in use merged in.
+data MergedPlan = MergedPlan
+  { mpPlanJson :: !CP.PlanJson
+    -- ^ The plan, after the merge.
+  , mpPlanPath :: !FilePath
+    -- ^ Where @plan.json@ itself was found.  @source-repository-package@
+    -- checkouts sit next to it.
+  , mpOverlay  :: !(Maybe AppliedOverlay)
+    -- ^ 'Nothing' when no overlay was in use.
+  }
+
+-- | An overlay that was read and merged.
+data AppliedOverlay = AppliedOverlay
+  { aoSource :: !OverlaySource
+  , aoPath   :: !FilePath
+  , aoReport :: !OverlayReport
+  }
+
+-- | Decode @dist-newstyle\/cache\/plan.json@ under the project root and
+-- merge the plan overlay in use into it.
+--
+-- Uses @cabal-plan@'s @findPlanJson@ for robust discovery.  The overlay is
+-- the one the setting names; with 'OverlayUnset' it is the default file if
+-- that exists, and none if it does not.  A file the setting names that
+-- cannot be read or understood fails the load ('PlanOverlayFailure'); one
+-- that does not exist ('OverlayMissing') applies no overlay, and was
+-- already warned about when the setting was resolved.
+--
+-- The one place @plan.json@ is decoded for a full plan, so 'loadBuildPlan'
+-- and a caller that wants the merge report (@hypha doctor@) read the same
+-- merged plan.
+loadMergedPlan :: OverlaySetting -> ProjectRoot -> IO (Either PlanError MergedPlan)
+loadMergedPlan setting root@(ProjectRoot rootDir) = runExceptT $ do
+  (planPath, pj) <- withExceptT (PlanNotFound . show) $ ExceptT $
+    try @IO @IOException $ do
+      planPath <- CP.findPlanJson (CP.ProjectRelativeToDir rootDir)
+      (planPath,) <$> CP.decodePlanJson planPath
+  chosen <- liftIO (chosenOverlay setting root)
+  case chosen of
+    Nothing -> pure (MergedPlan pj planPath Nothing)
+    Just (source, file) -> do
+      overlay <- withExceptT (PlanOverlayFailure source)
+                   (ExceptT (readPlanOverlay file))
+      let (merged, report) = applyPlanOverlay overlay pj
+      pure (MergedPlan merged planPath (Just (AppliedOverlay source file report)))
+
+-- | The overlay file to read, and where it came from, if any.
+chosenOverlay :: OverlaySetting -> ProjectRoot -> IO (Maybe (OverlaySource, FilePath))
+chosenOverlay setting root = case setting of
+  OverlayFile how f  -> pure (Just (OverlayExplicit how, f))
+  OverlayMissing{}   -> pure Nothing
+  OverlayUnset       -> do
+    let f = defaultOverlayPath root
+    exists <- doesFileExist f
+    pure (if exists then Just (OverlayDefault, f) else Nothing)
+
+-- | Load the build plan from @dist-newstyle\/cache\/plan.json@
+--   relative to the project root, with the plan overlay in use merged in
+--   ('loadMergedPlan').
+--
+--   For every unit whose source directory is known (inplace via
+--   @pkg-src.path@, a @source-repository-package@ checkout under
+--   @dist-newstyle/src@, or resolved through the source cache) we read its
+--   @.cabal@ file and stash the list of library components on the
+--   'PlannedUnit'.  This drives sub-library indexing in @hypha server@.
+loadBuildPlan
+  :: FilePath -> OverlaySetting -> ProjectRoot -> IO (Either PlanError BuildPlan)
+loadBuildPlan cacheRoot setting root = runExceptT $ do
+  MergedPlan pj planPath _ <- ExceptT (loadMergedPlan setting root)
+  liftIO $ do
+    cache <- Src.enumerateSourceCache (sourceCacheRoot cacheRoot)
+    -- @<builddir>/cache/plan.json@, so the checkouts are two levels up.
+    checkouts <- sourceRepoCheckouts
+                   (takeDirectory (takeDirectory planPath) </> "src")
+    -- How every module in this plan is to be read: the macros it is
+    -- preprocessed against, the compiler headers it may include, and
+    -- the platform its stanzas resolve for.  Derived here because this
+    -- is the one place that holds the compiler, the target platform and
+    -- every package version at once, and derived once rather than per
+    -- module.
+    ctx   <- buildContextFor cacheRoot pj
+    units <- unitsFromPlan pj cache checkouts ctx
+    pure BuildPlan
+      { bpCompiler     = compilerFromPlan pj
+      , bpUnits        = units
+      , bpOverrides    = []
+      , bpBuildContext = ctx
+      }
 
 -- | Just what the plan pins, one entry per package: the version and the
 -- configuration cabal resolved for it.

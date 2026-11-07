@@ -103,6 +103,13 @@ hyphaOptionsParser = HyphaOptions
        <> metavar "SECONDS"
        <> help "Remote Hoogle request timeout in seconds (default: 10)"
         ))
+  <*> optional (strOption
+        ( long "plan-overlay"
+       <> metavar "FILE"
+       <> help ("Plan overlay: JSON giving pkg-src for plan units that have none, "
+             <> "e.g. a nix-provided dependency "
+             <> "(default: $HYPHA_PLAN_OVERLAY, then <project root>/hypha-plan-overlay.json)")
+        ))
 
 -- | Whole positive seconds.
 --

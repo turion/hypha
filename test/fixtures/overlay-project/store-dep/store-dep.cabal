@@ -1,0 +1,10 @@
+cabal-version: 2.4
+name:          store-dep
+version:       1.0
+synopsis:      Dependency fixture: a package the plan lists without a source
+
+library
+  hs-source-dirs:   src
+  exposed-modules:  StoreDep.Hello
+  default-language: GHC2021
+  build-depends:    base

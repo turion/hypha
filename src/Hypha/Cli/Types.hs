@@ -49,6 +49,10 @@ data HyphaOptions = HyphaOptions
   , hoHoogleTimeout     :: !(Maybe TimeoutSeconds)
     -- ^ Override the remote Hoogle request timeout.  'Nothing' → the
     -- client's own default.
+  , hoPlanOverlay       :: !(Maybe FilePath)
+    -- ^ @--plan-overlay FILE@: the plan overlay to merge into
+    -- @plan.json@.  'Nothing' → @HYPHA_PLAN_OVERLAY@, then
+    -- @\<project root>\/hypha-plan-overlay.json@.
   }
   deriving stock (Show, Eq)
 

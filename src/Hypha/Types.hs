@@ -19,12 +19,18 @@ import Hypha.Cli.Types
 import Hypha.Error
 import Hypha.Logging (Tracer, LogEvent, silentTracer, verboseTracer)
 import Hypha.Cache (cacheRoot)
+import Hypha.Project.Plan
+  (OverlaySetting, resolveOverlaySetting, warnOverlayMissing)
+import System.Environment (lookupEnv)
 
 -- | Environment carried by 'HyphaM'.
 data HyphaEnv m = HyphaEnv
   { heOptions :: !HyphaOptions
   , heTracer  :: Tracer m
   , heCacheDir :: !FilePath
+  , heOverlay :: !OverlaySetting
+    -- ^ The plan overlay the flag and the environment name, settled (and
+    -- warned about, if missing) once per process; see 'runHypha'.
   }
 
 -- | The hypha CLI monad: 'HyphaEnv' in a reader, typed failure via
@@ -46,12 +52,23 @@ type Hypha = HyphaM IO
 -- @--quiet@ wins over @--verbose@.  It had no effect at all before: the
 -- flag was parsed, stored, and read nowhere, while the docs listed it as
 -- suppressing informational output.
+--
+-- The plan overlay is settled here too, because this is where the options
+-- meet the environment: @--plan-overlay@ wins over @HYPHA_PLAN_OVERLAY@,
+-- and a file either names that does not exist is warned about now, once,
+-- rather than by every plan load (@hypha versions@ makes two).  Nothing
+-- below reads the variable.
 runHypha :: MonadIO m => HyphaOptions -> HyphaM m a -> m (Either HyphaError a)
 runHypha opts (HyphaM m) = do
   resolvedCacheDir <- liftIO $ maybe cacheRoot pure (hoCacheDir opts)
+  overlay <- liftIO $ do
+    fromEnv <- lookupEnv "HYPHA_PLAN_OVERLAY"
+    setting <- resolveOverlaySetting (hoPlanOverlay opts) fromEnv
+    warnOverlayMissing setting
+    pure setting
   let verbose = hoVerbose opts && not (hoQuiet opts)
       env = HyphaEnv opts (if verbose then verboseTracer else silentTracer)
-                     resolvedCacheDir
+                     resolvedCacheDir overlay
   runExceptT (runReaderT m env)
 
 -- | Get the 'HyphaOptions' from the environment.

@@ -1,0 +1,8 @@
+{
+ "install-plan": [
+  {
+   "id": "store-dep-1.0-abc123",
+   "pkg-src": { "type": "local", "path": "test/fixtures/overlay-project/store-dep" }
+  }
+ ]
+}
