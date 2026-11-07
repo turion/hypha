@@ -6,6 +6,16 @@
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
       eachSystem = nixpkgs.lib.genAttrs systems;
     in {
+      # A plan overlay for hypha, over Haskell packages from the caller's own
+      # nixpkgs: `lib.planOverlay { pkgs = …; packages = [ … ]; }`.
+      lib.planOverlay = import ./nix/plan-overlay.nix;
+
+      checks = eachSystem (system: {
+        plan-overlay = import ./nix/tests/plan-overlay.nix {
+          pkgs = import nixpkgs { inherit system; };
+        };
+      });
+
       devShells = eachSystem (system:
         let pkgs = import nixpkgs { inherit system; };
             hp = pkgs.haskell.packages.ghc96;
