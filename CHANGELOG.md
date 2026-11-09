@@ -9,34 +9,10 @@ loosely follows [Semantic Versioning](https://semver.org/).
 ### Added
 
 - **A plan overlay gives `hypha` the source of nix-provided dependencies**
-  (issue #38). In a project whose dependencies come from a nixpkgs Haskell
-  package set, `cabal` lists them as `pre-existing` units with no
-  `pkg-src`, so `hypha` could only fetch Hackage's tarball: wrong for a
-  patched or git-pinned package, and impossible for one Hackage never had.
-  An overlay is a file in `plan.json`'s own vocabulary
-  (`{"install-plan": [{"id": …, "pkg-src": {"type": "local", "path": …}}]}`),
-  merged into the plan by unit id. `hypha` finds it through
-  `--plan-overlay FILE`, else `HYPHA_PLAN_OVERLAY`, else
-  `<project root>/hypha-plan-overlay.json`. A unit sourced this way stays a
-  dependency, and `hypha package` reports its origin as `distribution`
-  with the path. `hypha doctor` gains a `plan_overlay` check: where the
-  overlay came from, how many units it sourced, which entries it did not
-  apply, and which `pre-existing` units are left without a source (GHC's
-  boot packages always are). `nix/plan-overlay.nix`, also the flake's
-  `lib.planOverlay`, writes the file from a list of Haskell packages:
-  `nix-build … -o hypha-plan-overlay.json`. The new *Nix Projects* page of
-  the book walks through it.
-
-### Fixed
-
-- **A source asked for at a version other than the plan's is no longer
-  answered from the plan's source directory.** `hypha source
-  pkg-<other>` and `--package-override pkg=<other>` for a package the
-  plan builds from a directory (a local package or a
-  `source-repository-package` checkout) used to answer with the planned
-  version's tree, silently. They now look for the requested version
-  where they would for any package without a directory: the cabal store,
-  hypha's extracted-source cache, Hackage.
+  (issue #38). Point it at one with `--plan-overlay FILE`,
+  `HYPHA_PLAN_OVERLAY`, or `hypha-plan-overlay.json` at the project root;
+  `hypha doctor` reports it. `nix/plan-overlay.nix` writes the file; the
+  book's *Nix Projects* page has the rest.
 
 ### Removed
 
